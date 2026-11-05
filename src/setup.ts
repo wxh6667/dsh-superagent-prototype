@@ -1,7 +1,7 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu'
+export type SetupPlace = 'deployment' | 'github' | 'feishu' | 'local'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
@@ -14,6 +14,11 @@ export const SETUP_PROBLEMS = {
   repositoryUnreadable: ['github', '@{account} cannot read {repository}.'],
   repositoryUnreported: ['github', 'The agent GitHub CLI did not return {repository}.'],
   repositoryReadOnly: ['github', '@{account} cannot push to {repository}.'],
+  localRepositoryInvalid: ['local', 'The local repository must be an absolute directory: {path}.'],
+  localRepositoryMissing: ['local', 'The local repository does not exist: {path}.'],
+  localRepositoryNotGit: ['local', 'The local repository is not a git repository: {path}.'],
+  localRepositoryNoTrellis: ['local', 'The local repository has no .trellis directory: {path}. Run trellis init there first.'],
+  localActorNotAllowed: ['local', 'The local actor {actor} is not in the local Source\'s allowed list.'],
   feishuCliFailed: ['feishu', 'The bot lark-cli does not work.'],
   feishuNoApp: ['feishu', 'auth status of the bot lark-cli did not report the app.'],
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],

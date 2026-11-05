@@ -1648,3 +1648,22 @@ describe('ignores from the card', () => {
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
   })
 })
+
+describe('local requests', () => {
+  it('creates a ticket from a local trigger through an explicit decision', () => {
+    const h = harness({ gate: t => t.source === 'local'
+      ? { admissible: true, strength: 'explicit', basis: { via: 'listed' } }
+      : { admissible: false, reason: 'not local' } },
+    { prepareTicket: ticket => ({ ...ticket, execution: { name: 'local-1', directory: '/tmp/local-1', assignment: '' } }) })
+    const local = trigger('1', { source: 'local', actor: { source: 'local', id: 'local-user' },
+      threads: [{ source: 'local', id: 'local:t1' }], channel: { source: 'local', thread: 'local:t1', address: {} } })
+    expect(h.engine.receive(local)).toBe('stored')
+    const decision = h.engine.decide('1', { kind: 'accept', title: 'Local work', scope: 'small', reason: 'local', acknowledgement: 'On it' })
+    expect(decision.kind).toBe('accept')
+    const ticket = h.repo.tickets.get(decision.ticketId!)!
+    expect(ticket).toMatchObject({ title: 'Local work', origin: { triggerId: '1' }, mandate: { strength: 'explicit' },
+      execution: { name: 'local-1', directory: '/tmp/local-1' } })
+    expect(h.executor.start).toHaveBeenCalledTimes(1)
+    expect(h.outbox[0]).toMatchObject({ channel: local.channel, kind: 'acknowledgement' })
+  })
+})

@@ -1,9 +1,9 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, resolveLocalRepository, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
-import type { Settings, SettingsBlock } from '../policy.ts'
+import { allowedSender, type Settings, type SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 
 export interface SetupHost {
@@ -61,6 +61,7 @@ export class Setup {
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
     const { machine } = this.host
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
+      : block === 'source:local' ? Promise.resolve(resolveLocalRepository(settings.sources.local?.config))
       : resolveDeployment(machine, settings.sources.github?.config, this.probe())
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
   }
@@ -76,7 +77,18 @@ export class Setup {
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    // A local-only deployment does not need a GitHub account. Skip GitHub when its Source is off, or when it is
+    // still at its empty default and the local Source is enabled.
+    const githubConfig = settings.sources.github?.config
+    const localEnabled = settings.sources.local?.enabled === true
+    const githubConfigured = !!(githubConfig?.repository || githubConfig?.cli)
+    const github = settings.sources.github?.enabled !== false && (githubConfigured || !localEnabled) ? githubConfig : undefined
+    const local = localEnabled ? settings.sources.local?.config : undefined
+    const deployment = await resolveDeployment(machine, github, probe, undefined, local)
+    // The local Source is usable only when its configured actor is in the Policy's allowed list.
+    if (deployment.local && !allowedSender(settings, { source: 'local', id: deployment.local.actor })) {
+      throw new SetupError('localActorNotAllowed', { actor: deployment.local.actor })
+    }
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem

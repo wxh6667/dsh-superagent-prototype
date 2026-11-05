@@ -40,3 +40,9 @@ it('keeps a message for a Source that is not installed waiting, and sends it onc
   await at(5000)
   expect([h.runtime.outbox.status('waiting'), sent.map(message => message.id)]).toEqual(['sent', ['waiting']])
 })
+
+it('delivers a local message to the main Session without a Source channel', async () => {
+  h.runtime.outbox.send({ id: 'local-1', channel: { source: 'local', thread: 'local:1', address: {} }, text: 'local result', kind: 'reply' })
+  await h.runtime.sendReplies()
+  expect(h.runtime.outbox.status('local-1')).toBe('sent')
+})

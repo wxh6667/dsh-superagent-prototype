@@ -11,6 +11,8 @@ export interface OutboxHost {
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
+  /** Delivers a local Source message to the main Session; absent only in tests that never send one. */
+  readonly local?: (message: OutboundMessage) => Promise<'sent' | 'gone' | 'waiting'>
   paused(): boolean
 }
 
@@ -40,6 +42,14 @@ export class Outbox implements OutboxPort {
     const { store, sources, commands } = this.host
     const receipt = store.receipts.get(id)
     if (receipt?.status !== 'pending') return
+    // A local message goes to the main Session, not through a Source channel.
+    if (receipt.channel.source === 'local') {
+      if (!this.host.local) { store.receipts.settle(receipt, 'channelGone'); return }
+      const result = await this.host.local(receipt)
+      if (result === 'waiting') throw new Later('The local main Session is not ready')
+      store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
+      return
+    }
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')

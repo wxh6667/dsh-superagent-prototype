@@ -11,6 +11,7 @@ import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
 import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
+import { localKind } from '../src/sources/local.ts'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands, commandError } from '../src/infra/commands.ts'
@@ -1403,5 +1404,20 @@ describe('observing the GitHub repository', () => {
       meta: { ci: true, branch: 'main', sha: 'bbb2222' }, url: 'https://github.com/acme/widgets/commit/bbb2222' })
     expect(h.receive.mock.calls[0]![0].text).toContain('Read github/commits/bbb2222/checks for every check.')
     h.store.close()
+  })
+})
+
+describe('local source', () => {
+  it('admits configured local actors and exposes the worktree environment', () => {
+    const config = localKind.schema.parse({ repository: '/tmp/local-repo' })
+    expect(localKind.scope!({ meta: {} }, config)).toEqual({ listened: true, observed: false })
+    expect(localKind.environment!.values({ deployment: testDeployment(), config })).toEqual({
+      DSH_SUPERAGENT_LOCAL_REPO: '/tmp/local-repo',
+      DSH_SUPERAGENT_BASE_BRANCH: 'main',
+      DSH_SUPERAGENT_VERIFY: 'scripts/verify.sh',
+    })
+    expect(localKind.policy!.schema.parse({ allowed: [{ id: 'local-user' }] })).toEqual({ allowed: [{ id: 'local-user' }] })
+    expect(localKind.facts!(testDeployment({ local: { repository: '/tmp/local-repo', baseBranch: 'main', verify: 'scripts/verify.sh',
+      actor: 'local-user', actorName: 'Local user' } }))).toMatchObject({ repository: '/tmp/local-repo', baseBranch: 'main' })
   })
 })

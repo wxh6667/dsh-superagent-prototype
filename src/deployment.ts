@@ -50,14 +50,26 @@ export const GithubAccountsSchema = z.object({
   cli: z.string().trim().default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+/** Configuration of the local repository a local-only deployment works on. */
+export const LocalRepoSchema = z.object({
+  repository: z.string().trim().default(''),
+  baseBranch: z.string().trim().default('main'),
+  verify: z.string().trim().default('scripts/verify.sh'),
+  actor: z.string().trim().default('local-user'),
+  actorName: z.string().trim().default('Local user'),
+})
+export type LocalRepoConfig = z.infer<typeof LocalRepoSchema>
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape), local: Object.keys(LocalRepoSchema.shape) }
 
 export interface Deployment extends Machine {
+  /** Empty for a local-only deployment; GitHub links and PR operations are then unavailable. */
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  github?: { cli: string; login: string; noreply: string }
+  local?: LocalRepo
   feishu?: FeishuBot
 }
+export interface LocalRepo { repository: string; baseBranch: string; verify: string; actor: string; actorName: string }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
@@ -86,26 +98,58 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/**
+ * Validate a local repository configuration. An empty path means the local Source is not configured; a non-empty path
+ * must be an absolute git repository with a `.trellis` directory. The path is not initialized here.
+ */
+export function resolveLocalRepository(value: unknown): LocalRepo | undefined {
+  const config = LocalRepoSchema.parse(value ?? {})
+  const repository = config.repository
+  if (!repository) return undefined
+  if (!isAbsolute(repository)) throw new SetupError('localRepositoryInvalid', { path: repository })
+  let info
+  try { info = statSync(repository) } catch { throw new SetupError('localRepositoryMissing', { path: repository }) }
+  if (!info.isDirectory()) throw new SetupError('localRepositoryInvalid', { path: repository })
+  try { statSync(join(repository, '.git')) } catch { throw new SetupError('localRepositoryNotGit', { path: repository }) }
+  try { if (!statSync(join(repository, '.trellis')).isDirectory()) throw new SetupError('localRepositoryNoTrellis', { path: repository }) }
+  catch (error) { if (error instanceof SetupError) throw error; throw new SetupError('localRepositoryNoTrellis', { path: repository }) }
+  return { repository, baseBranch: config.baseBranch, verify: config.verify, actor: config.actor, actorName: config.actorName }
+}
+
+/**
+ * Verify the agent's GitHub CLI identity and push access to the configured repository, and/or validate a local repository.
+ * At least one repository is required. GitHub is resolved only when a remote repository is configured; a local-only
+ * deployment therefore needs no `gh` account. Both may be configured together.
+ */
+export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? '',
+  local?: unknown): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
+  const localRepo = resolveLocalRepository(local)
   const remote = accounts.repository
-  if (!remote) throw new SetupError('repositoryUnset')
-  if (!accounts.cli) throw new SetupError('agentCliUnset')
-  let cli: string
-  try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
-  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
-  const agent = parsed(GithubUser, text)
-  if (!agent) throw new SetupError('agentCliNoAccount')
-  // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
-  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
-    throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
-  }))
-  if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
-  const repository = access.name
-  if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  if (!remote && !localRepo) throw new SetupError('repositoryUnset')
+  let repository = ''
+  let githubDeployment: Deployment['github']
+  if (remote) {
+    if (!accounts.cli) throw new SetupError('agentCliUnset')
+    let cli: string
+    try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
+    const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
+    const agent = parsed(GithubUser, text)
+    if (!agent) throw new SetupError('agentCliNoAccount')
+    // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
+    const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
+      throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
+    }))
+    if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
+    repository = access.name
+    if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
+    githubDeployment = { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` }
+  } else if (accounts.cli) {
+    // A CLI without a repository is still a misconfigured GitHub Source.
+    throw new SetupError('repositoryUnset')
+  }
+  return { ...machine, repository, ...(githubDeployment ? { github: githubDeployment } : {}), ...(localRepo ? { local: localRepo } : {}) }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

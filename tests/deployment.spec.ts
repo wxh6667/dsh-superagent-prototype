@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Setup } from '../src/app/setup.ts'
+import { SettingsSchema } from '../src/policy.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -82,6 +84,37 @@ describe('setup', () => {
     await needs('github', 'repositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output }, { repository, cli: unreadable })
     await needs('github', 'agentCliNoAccount', {}, { repository, cli: program(join(dir, 'bin', 'gh-anonymous'), `echo '{}'`) })
     expect(() => executable('nothing-here', join(dir, 'bin'))).toThrow('nothing-here is not an executable file on PATH')
+  })
+  it('resolves a local-only deployment without a GitHub account', async () => {
+    mkdirSync(join(dir, 'widgets', '.trellis'), { recursive: true })
+    const local = await resolveDeployment(machine(), undefined, probe, path, { repository: join(dir, 'widgets') })
+    expect(local).toMatchObject({ repository: '', local: { repository: join(dir, 'widgets'), baseBranch: 'main', verify: 'scripts/verify.sh',
+      actor: 'local-user', actorName: 'Local user' } })
+    expect(local).not.toHaveProperty('github')
+    mkdirSync(join(dir, 'plain'))
+    await exec('git', ['init', '-q', join(dir, 'plain')], { env: gitEnv() })
+    await expect(resolveDeployment(machine(), undefined, probe, path, { repository: join(dir, 'plain') }))
+      .rejects.toMatchObject({ code: 'localRepositoryNoTrellis', place: 'local' })
+    await expect(resolveDeployment(machine(), undefined, probe, path, { repository: join(dir, 'missing') }))
+      .rejects.toMatchObject({ code: 'localRepositoryMissing', place: 'local' })
+    await expect(resolveDeployment(machine(), undefined, probe, path, { repository: 'relative/repo' }))
+      .rejects.toMatchObject({ code: 'localRepositoryInvalid', place: 'local' })
+  })
+  it('starts a local-only deployment without GitHub and requires the local actor in the policy', async () => {
+    const repo = join(dir, 'local-repo'); mkdirSync(repo)
+    await exec('git', ['init', '-q', repo], { env: gitEnv() })
+    mkdirSync(join(repo, '.trellis'))
+    const settings = (allowed: boolean) => SettingsSchema.parse({
+      sources: { github: { enabled: false, config: {} }, local: { enabled: true, config: { repository: repo } } },
+      policy: { sources: { local: { allowed: allowed ? [{ id: 'local-user' }] : [] } } },
+    })
+    const setup = new Setup({ context: { logger: { warn: vi.fn() } } as never, machine: { ...machine(), stateDir: join(dir, 'local-state') },
+      lifetime: new AbortController().signal, restart: vi.fn() })
+    expect(await setup.run(settings(false))).toBe(false)
+    expect(setup.problem).toMatchObject({ place: 'local', code: 'localActorNotAllowed' })
+    expect(await setup.run(settings(true))).toBe(true)
+    expect(setup.deployment).toMatchObject({ repository: '', local: { repository: repo, baseBranch: 'main' } })
+    setup.restore()
   })
   it('reads the Feishu bot from a bot-only lark-cli, or finds none when the Feishu Source names no CLI', async () => {
     expect(await resolveFeishuBot(machine(), {}, probe, path)).toBeUndefined()
