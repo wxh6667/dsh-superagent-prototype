@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
+import { automatic } from '../core/tickets.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
@@ -300,6 +301,8 @@ export class DshExecutor implements Executor {
         const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
         const inputId = ticket?.undelivered[0]
         if (!ticket || !assignment || inputId === undefined) return
+        const input = ticket.inputs.find(item => item.id === inputId)
+        if (waitsForPerson(ticket) && automatic(input)) return
         // Waking an idle worker reserves a slot (including the extra slot reserved for human follow-ups).
         const sessionId = workerSessionId(ticketId)
         if (!woken && !this.running(ticket)) {
@@ -308,7 +311,6 @@ export class DshExecutor implements Executor {
           this.slots.reserve(ticketId, person ? 'person' : 'wake')
           woken = true
         }
-        const input = ticket.inputs.find(item => item.id === inputId)
         try {
           // Recreate the worker session if it was externally deleted.
           if (!this.host.context.agents.get(sessionId as SessionId)) {
@@ -316,8 +318,10 @@ export class DshExecutor implements Executor {
           }
           if (input) await this.deliverInput(ticket, assignment, input)
         } catch (error) {
-          if (this.host.closing() || error instanceof Later) throw error
+          if (this.host.closing()) throw error
           const current = this.host.store.tickets.get(ticketId)
+          if (error instanceof Later && current && liveTicket(current) && waitsForPerson(current) && automatic(input)) return
+          if (error instanceof Later) throw error
           if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) return
           this.host.engine.deliveryFailed(ticketId, assignment.id, String(error))
           throw error
@@ -331,6 +335,7 @@ export class DshExecutor implements Executor {
     const live = () => {
       const current = this.host.store.tickets.get(ticket.id)
       if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) throw new Error('The ticket ended or another Assignment took it over')
+      if (waitsForPerson(current) && automatic(input)) throw new Later('Automatic input waits for a person')
       // A stop of the worker's background work that started meanwhile ends with a cancel, which would drop the Input.
       if (this.stopping.has(ticket.id)) throw new Later('The worker\'s background work is stopping')
     }

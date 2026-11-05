@@ -72,10 +72,16 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
-  const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
-  return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
+export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number, origins: readonly string[] = []): boolean {
+  if (req.headers['x-orchestrator-request'] !== '1') return false
+  const host = req.headers.host, origin = req.headers.origin
+  // A reverse proxy may serve the panel at an explicitly trusted origin. Accept that Origin even when the proxy rewrites
+  // Host to loopback, and accept a trusted Host for a request without an Origin.
+  if (origin !== undefined && origins.includes(origin)) return true
+  if (host === `127.0.0.1:${port}` || host === `localhost:${port}`) return origin === undefined || origin === `http://${host}`
+  if (host === undefined) return false
+  // A trusted Host may omit Origin, but an Origin that is present must be one of the trusted ones.
+  return origin === undefined && origins.some(value => { try { return new URL(value).host === host } catch { return false } })
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
@@ -234,7 +240,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
-      if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      if (!sameOrigin(req, ctx.webServer.port, runtime.machine?.managementOrigins ?? [])) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))

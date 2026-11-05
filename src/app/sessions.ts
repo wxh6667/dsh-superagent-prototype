@@ -60,6 +60,32 @@ declare module '@deepseek-ai/cordis' {
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+/**
+ * The read-only part of each mounted MCP server a worker may use, by the server name in `mcp__<server>__<tool>`.
+ * `readOnly` lists the raw tool names that stay visible; `exclude` hides the whole server. A server without an entry
+ * keeps all its tools. A tool a policy does not name stays hidden, so a renamed or newly added tool is safest as invisible
+ * until this policy names it. Write-capable servers such as `playwright` and Serena's editors must stay out: the Worker's
+ * file and shell tools are the only mutation path its Ticket authorizes.
+ */
+const MCP_WORK_POLICY: Record<string, { readOnly: readonly string[] } | { exclude: true }> = {
+  serena: { readOnly: ['read_file', 'list_dir', 'find_file', 'search_for_pattern', 'get_symbols_overview', 'find_symbol',
+    'find_referencing_symbols', 'find_implementations', 'find_declaration', 'get_diagnostics_for_file', 'get_diagnostics_for_symbol',
+    'initial_instructions', 'get_current_config', 'list_memories', 'read_memory'] },
+  playwright: { exclude: true },
+}
+/** The `mcp__` tool names a worker may see among `names`, applying `MCP_WORK_POLICY` by server name. */
+export function workerMcpTools(names: readonly string[]): string[] {
+  return names.filter(name => {
+    if (!name.startsWith('mcp__')) return false
+    const rest = name.slice('mcp__'.length)
+    const split = rest.indexOf('__')
+    if (split < 1) return false
+    const server = rest.slice(0, split), tool = rest.slice(split + 2)
+    const policy = MCP_WORK_POLICY[server]
+    if (!policy) return true
+    return 'exclude' in policy ? false : policy.readOnly.includes(tool)
+  })
+}
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -289,7 +315,10 @@ export class Sessions {
   private workOnly(agent: Agent, ticketId: string): (() => void)[] {
     const store = this.host.store
     const parent = scopeParentOf(agent)
-    const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
+    // MCP tools arrive from the profile as global tools, so the worker's allowlist must name them explicitly; guard alone
+    // cannot restore a restricted tool. Enumerate the visible ones and keep only the read-only share.
+    const visible = agent.ctx.tools.schemas(parent).map(schema => schema.name)
+    const allow = [...WORK_TOOLS, ...workerMcpTools(visible)].filter(name => agent.ctx.tools.get(name, parent))
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
       const current = store.tickets.get(ticketId)
       return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined

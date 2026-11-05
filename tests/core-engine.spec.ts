@@ -52,7 +52,7 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
       deliveries.delete(ticketId)
       const ticket = repo.tickets.get(ticketId)!
       const assignment = runningAssignment(ticket)
-      if (ticket.ended || !assignment) continue
+      if (ticket.ended || !assignment || waitsForPerson(ticket)) continue
       for (const inputId of ticket.undelivered) { delivered.push([ticketId, inputId]); engine.inputsDelivered(ticketId, assignment.id, [inputId]) }
     }
   }
@@ -962,19 +962,48 @@ describe('direct decisions', () => {
 
 })
 describe('automatic input', () => {
-  it('holds back automatic Input from a worker that reported blocked or failed until a person\'s message arrives', () => {
+  it('keeps automatic Inputs queued while blocked and delivers them after the human reply', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!
     const bot = (id: string) => trigger(id, { human: false })
-    h.engine.receive(bot('2'))
+    h.engine.receive(bot('2')); h.settle(); h.read(ticketId)
+    const beforeHold = h.delivered.length
     h.engine.report(ticketId, { state: 'blocked', summary: 'needs a decision' })
-    // Both pending and subsequent automated inputs stay queued on the ticket without waking the worker.
-    h.engine.receive(bot('3')); h.settle()
-    expect(h.repo.tickets.get(ticketId)).toMatchObject({ undelivered: [], inputs: [expect.objectContaining({ triggerId: '2' }), expect.objectContaining({ triggerId: '3' })] })
-    expect(h.delivered).toEqual([])
+    h.engine.receive(bot('3'))
+    expect(h.repo.tickets.get(ticketId)).toMatchObject({
+      undelivered: [key('input', ticketId, 'trigger', '3')],
+      inputs: [expect.objectContaining({ triggerId: '2' }), expect.objectContaining({ triggerId: '3' })],
+    })
+    expect(h.delivered.slice(beforeHold)).toEqual([])
     h.tick(1)
     h.engine.receive(trigger('4', { actor: guest })); h.engine.receive(bot('5')); h.settle()
-    expect(h.delivered.map(([, input]) => input)).toEqual([key('input', ticketId, 'trigger', '4'), key('input', ticketId, 'trigger', '5')])
+    expect(h.delivered.map(([, input]) => input)).toEqual([
+      key('input', ticketId, 'trigger', '2'), key('input', ticketId, 'trigger', '3'), key('input', ticketId, 'trigger', '4'),
+      key('input', ticketId, 'trigger', '5'),
+    ])
+    expect(h.delivered.filter(([, input]) => input === key('input', ticketId, 'trigger', '2'))).toHaveLength(1)
+    expect(h.repo.tickets.get(ticketId)?.undelivered).toEqual([])
+  })
+  it('flushes held automatic Inputs when a later report clears a failed hold', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.report(ticketId, { state: 'failed', summary: 'needs a person' })
+    h.engine.note(ticketId, 'context'); h.settle()
+    expect(h.delivered).toEqual([])
+    h.tick(1); h.engine.report(ticketId, { state: 'progress', summary: 'continuing' }); h.settle()
+    expect(h.delivered).toHaveLength(1)
+    expect(h.repo.tickets.get(ticketId)?.undelivered).toEqual([])
+  })
+  it('preserves held automatic Inputs across retry without duplicating their delivery', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const botInput = key('input', ticketId, 'trigger', '2')
+    h.engine.report(ticketId, { state: 'blocked', summary: 'needs a person' })
+    h.engine.receive(trigger('2', { human: false })); h.settle()
+    expect(h.repo.tickets.get(ticketId)?.undelivered).toEqual([botInput])
+    h.engine.retryTicket(ticketId); h.settle()
+    expect(h.delivered.map(([, input]) => input)).toEqual([botInput])
+    expect(h.delivered.filter(([, input]) => input === botInput)).toHaveLength(1)
   })
   it('stops waiting for a person on a person\'s message, a later report that is neither blocked nor failed, or a retry', () => {
     const h = harness()

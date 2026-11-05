@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import { workerMcpTools } from '../src/app/sessions.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -34,6 +35,10 @@ import { overview } from '../src/app/views/overview.ts'
 import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
+
+/** The worker allowlist this fake profile produces: its work tools plus the read-only share of the mounted MCP servers. */
+const WORKER_ALLOW = ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill',
+  'mcp__context7__resolve-library-id', 'mcp__context7__query-docs', 'mcp__serena__find_symbol']
 
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
@@ -164,12 +169,17 @@ beforeEach(async () => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const preset = {}
+      const mcpTools = ['mcp__context7__resolve-library-id', 'mcp__context7__query-docs', 'mcp__serena__find_symbol',
+        'mcp__serena__replace_content', 'mcp__playwright__browser_click']
       const inherited = ['bash', 'read', 'read_image', 'skill', 'job_output', 'job_list', 'job_kill', 'grep', 'web_search',
-        'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit']
+        'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit',
+        ...mcpTools]
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       agentCtx.reflect.provide('tools', { register: (tool: RegisteredTool) => { sessionTools.set(tool.name,
         tool); return () => sessionTools.delete(tool.name) },
+        // The profile's MCP tools are visible through the preset scope, as the MCP client registers them globally.
+        schemas: (scope?: object) => scope === preset ? mcpTools.map(name => ({ name, description: '', parameters: {} })) : [],
         // Preset tools are inherited; subagent is registered on the agent itself and cannot be named by restrict.
         get: (name: string, scope?: object) => {
           const own = scope === agents.get(sessionId)
@@ -1555,6 +1565,12 @@ it('reads the main Session\'s preset from a registry with or without presetForSe
   expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
 })
 
+it('lets a worker see only read-only MCP tools, never Playwright or Serena editors', () => {
+  expect(workerMcpTools(['read', 'mcp__context7__query-docs', 'mcp__sequential-thinking__sequentialthinking', 'mcp__serena__find_symbol',
+    'mcp__serena__replace_content', 'mcp__playwright__browser_click', 'mcp__serena__read_memory'])).toEqual([
+    'mcp__context7__query-docs', 'mcp__sequential-thinking__sequentialthinking', 'mcp__serena__find_symbol', 'mcp__serena__read_memory'])
+})
+
 it('refuses an ended ticket\'s worker its tools, and restricts the main Session to the tools it may use', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   expect(guards.get(sessionId)!()).toBeUndefined()
@@ -1563,7 +1579,7 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
-  expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
+  expect(restricts.get(sessionId)).toEqual([{ allow: WORKER_ALLOW }])
 })
 
 it('gives an explicit ticket\'s worker a prompt without the limits of an inferred Mandate', async () => {
@@ -1717,7 +1733,7 @@ it('gives a subagent of a worker only the worker\'s work tools, and none once th
   const child = agents.get('child-1')! as unknown as { session: { header: { parentSession?: string } } }
   child.session.header = { parentSession: sessionId }
   await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent: child } as never)
-  expect(restricts.get('child-1')).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
+  expect(restricts.get('child-1')).toEqual([{ allow: WORKER_ALLOW }])
   expect(guards.get('child-1')!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get('child-1')!()).toBe('Ticket ended; new work needs a new authorized ticket')
@@ -1739,7 +1755,7 @@ it('gives a subagent of a worker\'s subagent the same work tools and guard', asy
     agent.session.header = { parentSession: parent }
     await created.parallel('agent/created', { agent } as never)
   }
-  expect(restricts.get('grandchild-1')).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
+  expect(restricts.get('grandchild-1')).toEqual([{ allow: WORKER_ALLOW }])
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get('grandchild-1')!()).toBe('Ticket ended; new work needs a new authorized ticket')
 })

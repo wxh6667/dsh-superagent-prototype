@@ -160,7 +160,7 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
 The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
 
-Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
+Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`, unless the plugin configuration lists the panel's public origin in `managementOrigins`, such as `https://dsh.example.com` for a reverse proxy; even then the header is required. Missing headers or an `Origin` from another site receive 403.
 
 API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
 

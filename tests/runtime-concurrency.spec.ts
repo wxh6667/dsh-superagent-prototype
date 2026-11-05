@@ -125,6 +125,30 @@ it('keeps a launch that a pause cut short queued, and finishes it once processin
 })
 
 const botMessage = () => feishu('2', 'CI 失败', { mentions: [], root_id: 'om_1', sender_id: 'cli_ci', sender_type: 'bot' })
+it('keeps an automatic input queued when a worker becomes blocked during source-link lookup', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  idle(one.sessionId)
+  const gate = deferred()
+  vi.mocked(Commands.prototype.lark).mockImplementation(async args => {
+    if (args.includes('+messages-mget') && args.includes('om_2')) await gate.promise
+    return lark
+  })
+  const before = h.deliveries.mock.calls.length
+  h.runtime.receive(botMessage())
+  await waitUntil(() => linkLookedUp('om_2'))
+  await h.runTool(one.sessionId, 'orchestrator_report', { state: 'blocked', summary: 'waiting for a decision' })
+  const botInput = h.runtime.store.tickets.get(one.ticket.id)!.undelivered[0]
+  expect(h.deliveries.mock.calls.slice(before).map(([call]) => call.sessionId)).not.toContain(one.sessionId)
+  gate.resolve()
+  await h.runtime.idle()
+  expect(h.runtime.store.tickets.get(one.ticket.id)?.undelivered).toEqual([botInput])
+  expect(h.runtime.store.tickets.get(one.ticket.id)).not.toHaveProperty('delivery')
+  h.runtime.receive(feishu('3', '继续', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' }))
+  await h.runtime.idle()
+  expect(h.runtime.store.tickets.get(one.ticket.id)?.undelivered).toEqual([])
+  expect(h.deliveries.mock.calls.filter(([call]) => call.sessionId === one.sessionId).map(([call]) => call.text))
+    .toEqual(expect.arrayContaining([expect.stringContaining('CI 失败'), expect.stringContaining('继续')]))
+})
 it('wakes an idle worker for a bot\'s Input only when a worker slot is free, and creates a worker Session someone deleted again', async () => {
   const settings = h.runtime.store.settings()
   h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, maxWorkers: 1 } })

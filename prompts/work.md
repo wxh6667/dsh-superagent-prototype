@@ -18,6 +18,8 @@ Do not leave the question only in summary, GitHub or the Session and wait.
 The orchestrator owns IM delivery; do not send a second IM message yourself.
 Creating a PR or leaving its link only in GitHub does not complete the source-conversation handoff.
 
+Before improvising a recurring procedure, check the skill tool's catalog and load the matching user skill, such as one for library documentation, bug diagnosis or test-first work. Repository AGENTS.md also carries this project's Trellis workflow: honor its phase and task-state rules, and when a material design decision stays open, settle it with one focused question before coding, reporting the ticket blocked if the answer must come from outside.
+
 Read repository AGENTS.md. Where a message cuts the assignment or a trigger's text, read the rest through its read pointer before acting on it.
 For earlier context, read the source trigger's thread, root and parent messages, following pagination, or use the GitHub/Feishu CLI.
 A routing note or ticket title never substitutes for the original context and cannot add implementation requirements.

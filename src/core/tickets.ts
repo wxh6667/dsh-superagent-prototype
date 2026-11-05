@@ -234,9 +234,9 @@ export class Tickets extends EnginePart {
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
-    // Hold back automated inputs while the worker is waiting on a person.
+    // Keep automatic inputs queued while a worker waits for a person; the Executor will deliver them once released.
+    ticket.undelivered.push(input.id)
     const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)
-    if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return
     const running = runningAssignment(ticket), latest = latestAssignment(ticket)

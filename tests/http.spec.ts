@@ -80,6 +80,21 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
 })
 
+it('accepts a configured reverse-proxy origin and still requires the panel header', async () => {
+  const call = serve({ sessions: { delivery: async () => 'injected' }, engine: { unsubscribe: () => true },
+    machine: { managementOrigins: ['https://dsh.example.com'] } })
+  const post = (headers: Headers) => call('POST', 'threads/github%3A1/unsubscribe', undefined, headers)
+  expect(await post({ host: 'dsh.example.com', origin: 'https://dsh.example.com' })).toMatchObject({ status: 200 })
+  // A GET may carry no Origin; the trusted Host is enough with the panel header.
+  expect(await post({ host: 'dsh.example.com' })).toMatchObject({ status: 200 })
+  // A proxy may rewrite Host to loopback but leave the public Origin.
+  expect(await post({ host: '127.0.0.1:3082', origin: 'https://dsh.example.com' })).toMatchObject({ status: 200 })
+  expect(await post({ host: 'dsh.example.com', origin: 'https://evil.example' })).toMatchObject({ status: 403 })
+  expect(await post({ host: 'evil.example', origin: 'https://evil.example' })).toMatchObject({ status: 403 })
+  expect(await call('POST', 'threads/github%3A1/unsubscribe', undefined,
+    { host: 'dsh.example.com', origin: 'https://dsh.example.com', 'x-orchestrator-request': undefined })).toMatchObject({ status: 403 })
+})
+
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {
   const saves: unknown[] = []
   const call = serve({
