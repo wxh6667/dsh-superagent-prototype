@@ -1,5 +1,7 @@
 # Global any-session Superagent plugin
 
+> **Status: deferred/cancelled on 2026-11-05.** The user chose to keep only the Superagent main Session entry. This document is retained as a future design reference; nothing in this task was implemented.
+
 ## Goal
 
 Add one globally installed DSH plugin that lets any conversation create local Superagent work, routes it through the existing Engine, and returns results to the originating Session. Support multiple repositories without installing anything per project.

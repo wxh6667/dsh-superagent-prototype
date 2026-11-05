@@ -3,7 +3,7 @@
   "name": "global-any-session-plugin",
   "title": "Global any-session Superagent plugin",
   "description": "Add a global DSH plugin that lets any conversation create local Superagent work, route it through the existing Engine, and return results to the originating Session; support multiple repositories.",
-  "status": "completed",
+  "status": "cancelled",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -21,6 +21,8 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
-  "meta": {}
+  "notes": "Deferred by the user on 2026-11-05: only the Superagent main Session entry is retained; the global any-session plugin was not implemented.",
+  "meta": {
+    "cancelled": true
+  }
 }
