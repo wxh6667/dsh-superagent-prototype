@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mainTools, type MainToolsHost } from '../src/app/tools/main.ts'
-import { Trellis, slugify } from '../src/infra/trellis.ts'
+import { workerCommitGuard } from '../src/app/sessions.ts'
+import { Trellis, slugify, trellisCommitGuard } from '../src/infra/trellis.ts'
 
 let dir: string
 let repo: string
@@ -92,16 +93,45 @@ describe('main Session local tools', () => {
     expect(result).toMatchObject({ parent: { dir: '/p', title: 'Parent' }, children: [] })
     expect(host.engine.decide).not.toHaveBeenCalled()
   })
-  it('dispatches one local Trigger and Ticket per task', async () => {
+  it('dispatches one local Trigger and Ticket per task, with separate threads', async () => {
     const { host, tools: list } = tools()
     const dispatch = list.find(tool => tool.name === 'orchestrator_local_dispatch')!
-    const taskDir = join(repo, '.trellis', 'tasks', '11-05-local-work')
-    const result = await dispatch.execute({ tasks: [{ task_dir: taskDir, title: 'Local work', acknowledgement: 'On it' }] }, new AbortController().signal)
-    expect(host.receive).toHaveBeenCalledWith(expect.objectContaining({ source: 'local', human: true, addressed: 'direct',
+    const first = join(repo, '.trellis', 'tasks', '11-05-local-work')
+    const second = join(repo, '.trellis', 'tasks', '11-05-other-work')
+    const result = await dispatch.execute({ tasks: [
+      { task_dir: first, title: 'Local work', acknowledgement: 'On it' },
+      { task_dir: second, title: 'Other work', acknowledgement: 'On it too' },
+    ] }, new AbortController().signal)
+    expect(host.receive).toHaveBeenCalledTimes(2)
+    expect(host.engine.decide).toHaveBeenCalledTimes(2)
+    expect(host.receive).toHaveBeenNthCalledWith(1, expect.objectContaining({ source: 'local', human: true, addressed: 'direct',
       threads: [{ source: 'local', id: 'local:session-1:11-05-local-work' }], channel: expect.objectContaining({ source: 'local' }) }))
-    expect(host.engine.decide).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: 'accept', title: 'Local work',
+    expect(host.receive).toHaveBeenNthCalledWith(2, expect.objectContaining({ threads: [{ source: 'local', id: 'local:session-1:11-05-other-work' }] }))
+    expect(host.engine.decide).toHaveBeenNthCalledWith(1, expect.any(String), expect.objectContaining({ kind: 'accept', title: 'Local work',
       name: 'local-work', reason: { code: 'explicitRouted' } }))
-    expect(result).toMatchObject({ results: [{ decision: 'accept' }] })
+    expect(host.engine.decide).toHaveBeenNthCalledWith(2, expect.any(String), expect.objectContaining({ title: 'Other work', name: 'other-work' }))
+    expect(result).toMatchObject({ results: [{ decision: 'accept' }, { decision: 'accept' }] })
     expect(host.requestPass).toHaveBeenCalled()
+  })
+})
+
+describe('commit gates', () => {
+  it('requires an in-progress Trellis task for a main-Session git commit', () => {
+    expect(trellisCommitGuard('git status', undefined)).toBeUndefined()
+    expect(trellisCommitGuard('git commit -m work', undefined)).toContain('No active Trellis task')
+    expect(trellisCommitGuard('git commit -m work', { dir: 'task', status: 'planning' })).toContain('planning')
+    expect(trellisCommitGuard('git commit -m work', { dir: 'task', status: 'in_progress' })).toBeUndefined()
+    expect(trellisCommitGuard('WXH_TRELLIS_BYPASS=1 git commit -m work', undefined)).toBeUndefined()
+    expect(trellisCommitGuard('git -C repo commit -m work', undefined)).toContain('No active Trellis task')
+  })
+  it('refuses commit and push in a local worker', () => {
+    expect(workerCommitGuard('git status')).toBeUndefined()
+    expect(workerCommitGuard('git commit -m work')).toContain('do not commit or push')
+    expect(workerCommitGuard('git -C repo push origin branch')).toContain('do not commit or push')
+  })
+  it('reads the active task synchronously for the guard', () => {
+    const trellis = new Trellis({ repository: () => repo, sessionId: 'session-1',
+      runSync: () => JSON.stringify({ current_task: { dir: '.trellis/tasks/11-05-work', status: 'in_progress' } }) })
+    expect(trellis.currentSync()).toEqual({ dir: '.trellis/tasks/11-05-work', status: 'in_progress' })
   })
 })

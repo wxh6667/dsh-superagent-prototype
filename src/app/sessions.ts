@@ -24,7 +24,7 @@ import type { RegisterTool, Tool } from './tools/tool.ts'
 export interface SessionsHost {
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
   readonly context: Context
-  readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'settings' | 'get' | 'set' | 'keys'>
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'skills'>
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
@@ -32,6 +32,8 @@ export interface SessionsHost {
   readonly masterId: string
   readonly lifetime: AbortSignal
   closing(): boolean
+  /** Refuses a main-Session command that must not run, such as a commit without an active Trellis task. */
+  readonly commitGuard?: (execution: { name: string; arguments?: unknown }) => string | undefined
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
@@ -85,6 +87,21 @@ export function workerMcpTools(names: readonly string[]): string[] {
     if (!policy) return true
     return 'exclude' in policy ? false : policy.readOnly.includes(tool)
   })
+}
+/** A local worker must not commit or push; the main Session commits after review. */
+export function workerCommitGuard(command: string): string | undefined {
+  return /\bgit\b[^\n;&|]*\b(?:commit|push)\b/.test(command)
+    ? 'Local workers do not commit or push; report ready with verification evidence and let the main Session commit'
+    : undefined
+}
+/** The shell command of a bash or pwsh tool call, if it has one. */
+export function commandOf(execution: { name: string; arguments?: unknown }): string | undefined {
+  if (execution.name !== 'bash' && execution.name !== 'pwsh') return undefined
+  const input = typeof execution.arguments === 'string'
+    ? (() => { try { return JSON.parse(execution.arguments as string) as unknown } catch { return undefined } })()
+    : execution.arguments
+  const command = (input as { command?: unknown } | undefined)?.command
+  return typeof command === 'string' ? command : undefined
 }
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
@@ -287,7 +304,7 @@ export class Sessions {
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill', 'ask_user_question'] }),
-        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
+        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent)) ?? this.host.commitGuard?.(execution)))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
@@ -319,9 +336,16 @@ export class Sessions {
     // cannot restore a restricted tool. Enumerate the visible ones and keep only the read-only share.
     const visible = agent.ctx.tools.schemas(parent).map(schema => schema.name)
     const allow = [...WORK_TOOLS, ...workerMcpTools(visible)].filter(name => agent.ctx.tools.get(name, parent))
-    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
+    const local = () => {
+      const ticket = store.tickets.get(ticketId)
+      return !!ticket && store.triggers.get(ticket.origin.triggerId)?.source === 'local'
+    }
+    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(execution => {
       const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
+      if (!current || !liveTicket(current)) return 'Ticket ended; new work needs a new authorized ticket'
+      if (!local()) return undefined
+      const command = commandOf(execution)
+      return command === undefined ? undefined : workerCommitGuard(command)
     })]
   }
   /**

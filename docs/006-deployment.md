@@ -26,6 +26,19 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
+## Local repository (optional)
+
+A deployment can run without GitHub by enabling the **local** Source and pointing it at a local git repository that has already been initialized with Trellis (`trellis init --dsh`). The local Source is off by default; enabling it does not require a GitHub account.
+
+1. On the local Source card, set the repository's absolute path, the base branch, the verification command (default `scripts/verify.sh`) and the local actor id/name. Add that actor id to the Policy's local allowed list; setup refuses a local actor that is not allowed.
+2. The repository needs `.trellis/scripts/task.py` and `.trellis/.developer`. dsh-superagent does not initialize Trellis; a missing directory is reported as a setup problem.
+3. Set the Execution `prepare` command to create a worktree for each Ticket. The packaged `scripts/prepare-worktree.sh` uses `DSH_SUPERAGENT_LOCAL_REPO`, `DSH_SUPERAGENT_DIR`, `DSH_SUPERAGENT_NAME` and `DSH_SUPERAGENT_BASE_BRANCH`; an equivalent inline command is `git -C "$DSH_SUPERAGENT_LOCAL_REPO" worktree add "$DSH_SUPERAGENT_DIR" -b "$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_BASE_BRANCH"`.
+4. The target repository should provide `scripts/verify.sh`. The worker runs it in its worktree; the main Session reruns it before committing.
+5. The main Session creates Trellis tasks and local Tickets, reviews each worker's diff and verification evidence, and commits in the target repository under an in-progress Trellis task. Workers do not commit, push or open pull requests.
+6. A main-Session `git commit` is refused when the local repository has no in-progress Trellis task. The explicit bypass is the command prefix `WXH_TRELLIS_BYPASS=1`.
+
+The local Source's variables are also listed in the worker's execution environment section. A local-only deployment still needs a model provider; GitHub and Feishu can both stay off.
+
 ## Accounts
 
 ### Agent GitHub account

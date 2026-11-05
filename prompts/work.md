@@ -49,3 +49,10 @@ Call orchestrator_report with progress, ready, blocked, failed or dropped; inclu
 Omit pr_number or use null if no PR exists; never fill it with a placeholder such as 1.
 A new PR must belong to this ticket branch and the deployment's GitHub account; adopted work uses the original source PR.
 ready means reviewed implementation with relevant checks passed.
+
+## Local tickets
+A local ticket's assignment names a Trellis task directory.
+Read its prd.md, design.md and implement.md before working.
+Work only in this ticket's worktree; never modify the main repository or its .trellis directory.
+Run the verification entrypoint named in the execution environment and report the exact command and result.
+Do not commit, push or open a pull request; report ready with a diff summary and the worktree path.

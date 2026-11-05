@@ -18,7 +18,7 @@ import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { localKind } from '../sources/local.ts'
 import { Commands } from '../infra/commands.ts'
-import { Trellis } from '../infra/trellis.ts'
+import { Trellis, trellisCommitGuard } from '../infra/trellis.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -42,7 +42,7 @@ import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
-import { Sessions } from './sessions.ts'
+import { Sessions, commandOf } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -125,7 +125,7 @@ export class Runtime extends Service implements SourceHost {
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
-        lifetime: this.lifetime,
+        lifetime: this.lifetime, commitGuard: execution => this.commitGuard(execution),
         closing: () => this.closing(), environment,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
@@ -210,6 +210,14 @@ export class Runtime extends Service implements SourceHost {
     const summary = message.kind === 'acknowledgement' ? 'local acknowledgement' : 'local result'
     this.sessions.notify(`local:${message.id}`, { text: message.text, kind: message.kind, ticket_id: message.ticketId ?? null }, summary)
     return 'sent'
+  }
+  /** Refuses a main-Session commit unless the local repository has an in-progress Trellis task. */
+  private commitGuard(execution: { name: string; arguments?: unknown }): string | undefined {
+    const command = commandOf(execution)
+    if (!command || !/\bgit\b[^\n;&|]*\bcommit\b/.test(command)) return undefined
+    if (!this.setup.configured() || !this.setup.deployment.local) return undefined
+    try { return trellisCommitGuard(command, this.trellis.currentSync()) }
+    catch (error) { return `Cannot verify the Trellis task: ${error instanceof Error ? error.message : String(error)}` }
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
