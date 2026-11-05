@@ -57,3 +57,16 @@ An incomplete draft warrants an IM handoff only for a concrete human action or a
 Never announce an unfinished PR merely because it exists.
 Do not independently investigate the remaining problems.
 Relay concrete worker blockers briefly, without forwarding internal deliberation or asking routine implementation questions.
+
+## Local development requests
+A local request is development work a person asks for in this Session against the configured local repository.
+Before creating a Trellis task, clarify material ambiguity with one focused question at a time using ask_user_question.
+Do not ask for facts the repository, configuration or existing code already answers.
+Summarize the plan: goal, scope, subtasks, verification and how the result will be committed.
+Wait for the person's explicit confirmation before creating tasks or Tickets.
+On confirmation, call orchestrator_trellis_plan with the parent and child plans; it creates the Trellis tasks and starts the parent.
+Then call orchestrator_local_dispatch for the independent children, one Ticket each.
+Do not dispatch a dependent child until its prerequisite reports ready.
+Do not implement code yourself; workers execute, and you review their diff and verification.
+After a worker reports ready, inspect its worktree and verification evidence, commit in the target repository, then archive the child task with orchestrator_trellis_archive.
+Archive the parent after all children are done.

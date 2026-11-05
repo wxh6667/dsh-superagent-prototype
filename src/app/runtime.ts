@@ -18,6 +18,7 @@ import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { localKind } from '../sources/local.ts'
 import { Commands } from '../infra/commands.ts'
+import { Trellis } from '../infra/trellis.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -69,6 +70,7 @@ export class Runtime extends Service implements SourceHost {
   readonly executor: DshExecutor
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
+  readonly trellis: Trellis
   readonly engine: Engine
   readonly passes: Passes
   readonly ready: Promise<void>
@@ -104,6 +106,7 @@ export class Runtime extends Service implements SourceHost {
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
+      this.trellis = new Trellis({ repository: () => setup.configured() ? setup.deployment.local?.repository ?? '' : '', sessionId: masterId })
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board)
@@ -165,6 +168,8 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        local: () => setup.configured() ? setup.deployment.local : undefined, trellis: this.trellis, masterId,
+        receive: trigger => engine.receive(trigger),
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()

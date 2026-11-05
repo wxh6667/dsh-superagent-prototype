@@ -1,9 +1,12 @@
 /** Main Session tools for routing triggers, assessing candidates, sending replies, and updating settings and prompts. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { basename, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
+import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople, type ReceiveResult, type Trigger }
   from '../../core/index.ts'
+import type { LocalRepo } from '../../deployment.ts'
+import type { Trellis } from '../../infra/trellis.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
@@ -26,6 +29,12 @@ export interface MainToolsHost {
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
   readonly assessor: Pick<MasterAssessor, 'context' | 'read' | 'decide'>
   readonly resources: ResourceHost
+  /** The configured local deployment, or undefined when the local Source is off or setup is pending. */
+  readonly local: () => LocalRepo | undefined
+  readonly trellis: Pick<Trellis, 'plan' | 'archive'>
+  readonly masterId: string
+  /** Stores a local Trigger through the Engine; the dispatch tool is its Source. */
+  readonly receive: (trigger: Trigger) => ReceiveResult
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
   sendReplies(): Promise<void>
@@ -40,6 +49,38 @@ function routed(host: MainToolsHost, result: { decision?: DecisionKind; reason: 
     ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
 }
 const fromDecision = (decision: Decision) => ({ decision: decision.kind, reason: reasonText(decision.reason), ticketId: decision.ticketId })
+/** One task in a confirmed local plan; the adapter writes the artifacts into the created Trellis directory. */
+const TrellisTaskPlanSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  description: z.string().trim().min(1).max(2000),
+  prd: z.string().min(1).max(100000),
+  design: z.string().max(100000).optional(),
+  implement: z.string().max(100000).optional(),
+}).strict()
+const TrellisPlanSchema = z.object({ parent: TrellisTaskPlanSchema, children: z.array(TrellisTaskPlanSchema).max(8).default([]) }).strict()
+const TrellisArchiveSchema = z.object({ task_dir: z.string().trim().min(1) }).strict()
+const LocalDispatchTaskSchema = z.object({
+  task_dir: z.string().trim().min(1).describe('The Trellis task directory created by orchestrator_trellis_plan.'),
+  title: z.string().trim().min(1).max(200),
+  scope: z.string().trim().max(1500).optional(),
+  acknowledgement: AcknowledgementSchema,
+  worktree_name: WorktreeNameSchema.optional().describe('Optional short English name; derived from the task directory when omitted.'),
+  note: RoutingNoteSchema.optional(),
+}).strict()
+const LocalDispatchSchema = z.object({ tasks: z.array(LocalDispatchTaskSchema).min(1).max(8) }).strict()
+/** A worktree name derived from a task directory, valid for `WorktreeNameSchema`. */
+function localWorktreeName(taskDir: string): string {
+  const base = basename(taskDir).replace(/^\d{2}-\d{2}-/, '')
+  const words = base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').split('-').filter(Boolean).slice(0, 4).join('-').slice(0, 32)
+  return WorktreeNameSchema.parse(/^[a-z]/.test(words) ? words : `task-${words || 'local'}`.slice(0, 32))
+}
+/** Resolve a task directory and keep it under the local repository's `.trellis/tasks`. */
+function localTaskDir(local: LocalRepo, taskDir: string): string {
+  const tasks = resolve(local.repository, '.trellis', 'tasks')
+  const target = resolve(taskDir)
+  if (!target.startsWith(tasks + sep)) throw new Error(`Not a Trellis task under ${tasks}: ${taskDir}`)
+  return target
+}
 /**
  * One routing decision of `orchestrator_route`. The schema holds only its shape: each kind's fields are checked as its item
  * runs (`FIELDS`), so an item that lacks one, or whose value breaks a limit, is refused alone.
@@ -295,6 +336,65 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         if (args.baseRevision === undefined) throw new Error('Saving needs baseRevision, the revision the configuration edits')
         const { context_delivery: _delivery, ...saved } = await savePrompts(host, args.config, args.baseRevision, 'tool')
         return saved
+      },
+    }),
+    tool({
+      name: 'orchestrator_trellis_plan',
+      description: 'Create the parent and child Trellis tasks for a confirmed local plan, write their PRD/Design/Implement artifacts, and start the parent as this Session\'s active task. It creates no Tickets. Call only after the user confirms the plan.',
+      schema: TrellisPlanSchema,
+      execute: async args => {
+        const local = host.local()
+        if (!local) throw new Error('The local Source is not configured; enable it and set its repository first')
+        const plan = await host.trellis.plan({ parent: args.parent, children: args.children })
+        return { ...plan, repository: local.repository }
+      },
+    }),
+    tool({
+      name: 'orchestrator_local_dispatch',
+      description: 'Create one local Trigger and Ticket per confirmed child task. Independent children may be dispatched together; call only after orchestrator_trellis_plan and the user\'s confirmation.',
+      schema: LocalDispatchSchema,
+      execute: async args => {
+        const local = host.local()
+        if (!local) throw new Error('The local Source is not configured; enable it and set its repository first')
+        const results: Record<string, unknown>[] = []
+        for (const task of args.tasks) {
+          try {
+            const taskDir = localTaskDir(local, task.task_dir)
+            const thread = `local:${host.masterId}:${basename(taskDir)}`
+            const trigger: Trigger = {
+              id: key('trigger', 'local', taskDir, thread), source: 'local', threads: [{ source: 'local', id: thread }],
+              actor: { source: 'local', id: local.actor }, human: true, addressed: 'direct', at: new Date().toISOString(),
+              text: `${task.title}\n\nTrellis task: ${taskDir}\nRead the task's prd.md, design.md and implement.md before working.`,
+              channel: { source: 'local', thread, address: { thread } }, meta: { task_dir: taskDir, repository: local.repository },
+            }
+            const received = host.receive(trigger)
+            if (received === 'filtered') {
+              results.push({ task_dir: taskDir, refused: 'The local Source is off or the local actor is not in its allowed list' })
+              continue
+            }
+            const decision = host.engine.decide(trigger.id, { kind: 'accept', title: task.title, scope: task.scope ?? task.title,
+              reason: { code: 'explicitRouted' }, acknowledgement: task.acknowledgement, name: task.worktree_name ?? localWorktreeName(taskDir),
+              note: [`Trellis task: ${taskDir}`, ...(task.note ? [task.note] : [])].join('\n') })
+            const ticket = decision.ticketId ? host.store.tickets.get(decision.ticketId) : undefined
+            results.push({ task_dir: taskDir, decision: decision.kind, reason: reasonText(decision.reason), ...(ticket ? { ticket: ticketCard(ticket) } : {}) })
+          } catch (error) {
+            results.push({ task_dir: task.task_dir, refused: error instanceof Error ? error.message : String(error) })
+          }
+        }
+        host.requestPass()
+        return { results }
+      },
+    }),
+    tool({
+      name: 'orchestrator_trellis_archive',
+      description: 'Archive a completed Trellis task after its commit. Trellis updates the task status and moves it to the archive.',
+      schema: TrellisArchiveSchema,
+      execute: async args => {
+        const local = host.local()
+        if (!local) throw new Error('The local Source is not configured; enable it and set its repository first')
+        const taskDir = localTaskDir(local, args.task_dir)
+        await host.trellis.archive(taskDir)
+        return { archived: taskDir }
       },
     }),
   ]
