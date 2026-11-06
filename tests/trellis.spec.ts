@@ -83,10 +83,11 @@ describe('main Session local tools', () => {
   const ownedTicket = (id: string, swarmId: string, ended = false): Ticket => ({
     id, swarmId, ...ended ? { ended: { at: '2026-10-02T00:00:00.000Z', by: 'executor', outcome: 'completed' } } : {},
   } as Ticket)
-  function tools(swarm?: Swarm, existing: Ticket[] = []) {
+  function tools(swarm?: Swarm | (() => Swarm | undefined), existing: Ticket[] = []) {
     const trellis = { plan: vi.fn(async () => ({ parent: { dir: '/p', title: 'Parent' }, children: [] })), archive: vi.fn() }
     const swarmTrellis = { plan: vi.fn(async () => ({ parent: { dir: '/s', title: 'Swarm parent' }, children: [] })), archive: vi.fn() }
     const trellisFor = vi.fn(() => swarmTrellis)
+    const swarmOf = typeof swarm === 'function' ? swarm : () => swarm
     const host = {
       context: { logger: { warn: vi.fn() } },
       engine: { decide: vi.fn(() => ({ kind: 'accept', ticketId: 't1', reason: { code: 'explicitRouted' } })) },
@@ -96,7 +97,7 @@ describe('main Session local tools', () => {
       trellis, trellisFor,
       masterId: 'session-1', receive: vi.fn(() => 'stored'), requestPass: vi.fn(), sendReplies: vi.fn(), quietly: (run: () => unknown) => run(),
     } as unknown as MainToolsHost
-    return { host, tools: mainTools(host, { id: 'master' } as never, swarm), trellis, swarmTrellis, trellisFor }
+    return { host, tools: mainTools(host, { id: 'master' } as never, swarmOf), trellis, swarmTrellis, trellisFor }
   }
   it('creates a plan without creating Tickets', async () => {
     const { host, tools: list } = tools()
@@ -215,6 +216,41 @@ describe('main Session local tools', () => {
     expect(host.receive).toHaveBeenCalledTimes(2)
     expect(host.engine.decide).toHaveBeenCalledTimes(2)
     expect(result).toMatchObject({ results: [{ decision: 'accept' }, { decision: 'accept' }] })
+  })
+  it('resolves the calling swarm on every call, so a master decorated before its swarm was saved still attributes its dispatch', async () => {
+    const workspace = join(dir, 'swarm-workspace')
+    mkdirSync(join(workspace, '.trellis', 'tasks'), { recursive: true })
+    const swarm = swarmFixture(workspace)
+    let current: Swarm | undefined
+    const { host, tools: list, trellis, swarmTrellis, trellisFor } = tools(() => current)
+    const dispatch = list.find(tool => tool.name === 'orchestrator_local_dispatch')!
+    const swarmTask = join(workspace, '.trellis', 'tasks', '11-05-lazy')
+    const legacyTask = join(repo, '.trellis', 'tasks', '11-05-lazy')
+    const dispatchFrom = (taskDir: string) => dispatch.execute(
+      { tasks: [{ task_dir: taskDir, title: 'Lazy', acknowledgement: 'On it' }] }, new AbortController().signal)
+    // No swarm owns the Session yet: the dispatch is legacy, with the master's own thread and no swarmId.
+    await dispatchFrom(legacyTask)
+    expect(host.receive).toHaveBeenLastCalledWith(expect.objectContaining({
+      threads: [{ source: 'local', id: 'local:master:11-05-lazy' }],
+      meta: { task_dir: legacyTask, repository: repo, originSessionId: 'master' } }))
+    // Saved now: the same Session resolves it on its next call and the dispatch carries the swarm's ownership.
+    current = swarm
+    await dispatchFrom(swarmTask)
+    expect(host.receive).toHaveBeenLastCalledWith(expect.objectContaining({
+      threads: [{ source: 'local', id: 'local:swarm-1:11-05-lazy' }],
+      meta: { task_dir: swarmTask, repository: workspace, swarmId: 'swarm-1', originSessionId: 'master' } }))
+    // The swarm's own Trellis replaces the legacy one for plan and archive too.
+    await list.find(tool => tool.name === 'orchestrator_trellis_plan')!.execute(
+      { parent: { title: 'Parent', description: 'Parent', prd: '# P' }, children: [] }, new AbortController().signal)
+    expect(trellisFor).toHaveBeenLastCalledWith(swarm)
+    expect(swarmTrellis.plan).toHaveBeenCalledTimes(1)
+    expect(trellis.plan).not.toHaveBeenCalled()
+    // A completed swarm is no longer active, so its master falls back to the legacy path again.
+    current = undefined
+    await dispatchFrom(legacyTask)
+    expect(host.receive).toHaveBeenLastCalledWith(expect.objectContaining({
+      threads: [{ source: 'local', id: 'local:master:11-05-lazy' }],
+      meta: { task_dir: legacyTask, repository: repo, originSessionId: 'master' } }))
   })
 })
 

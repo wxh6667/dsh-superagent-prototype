@@ -131,7 +131,9 @@ export class Runtime extends Service implements SourceHost {
         masterFor: swarmId => this.swarms.masterFor(swarmId),
         lifetime: this.lifetime, commitGuard: (execution, sessionId) => this.commitGuard(execution, sessionId),
         closing: () => this.closing(), environment, workspaces: swarmWorkspaces,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent, this.swarms.swarmOf(agent.id)) })
+        // A new swarm's master is decorated before its record is saved, so the main tools resolve it on each call.
+        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket)
+          : mainTools(this.toolHost, agent, () => this.swarms.swarmOf(agent.id)) })
       this.swarms = new SwarmManager({ store, sessions, workspace: ctx.workspaceRegistry, workspaces: swarmWorkspaces,
         report: (swarm, error) => ctx.logger.warn('dsh-superagent could not restore swarm %s: %s', swarm.id, String(error)) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }

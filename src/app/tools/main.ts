@@ -83,8 +83,12 @@ function localTaskDir(workspace: string, taskDir: string): string {
 /** The calling swarm's Trellis: the host seam, or one bound to the swarm's own workspace. */
 const trellisOf = (host: MainToolsHost, swarm: Swarm): Pick<Trellis, 'plan' | 'archive'> =>
   host.trellisFor?.(swarm) ?? new Trellis({ repository: () => swarm.workspace, sessionId: swarm.masterSessionId })
-/** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session, and `swarm`, when present, is the calling master's swarm. */
-export function mainTools(host: MainToolsHost, agent: Agent, swarm?: Swarm): Tool[] {
+/**
+ * Builds the main Session's tools; `agent` scopes prompt preview resources to that Session, and `swarmOf` resolves the
+ * calling master's swarm. It is read when a tool runs, never captured at decoration: a new swarm saves its record only
+ * after the master Session that dispatches for it has been decorated.
+ */
+export function mainTools(host: MainToolsHost, agent: Agent, swarmOf: () => Swarm | undefined): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
@@ -178,6 +182,7 @@ export function mainTools(host: MainToolsHost, agent: Agent, swarm?: Swarm): Too
       description: 'Create the parent and child Trellis tasks for a confirmed local plan, write their PRD/Design/Implement artifacts, and start the parent as this Session\'s active task. It creates no Tickets. Call only after the user confirms the plan.',
       schema: TrellisPlanSchema,
       execute: async args => {
+        const swarm = swarmOf()
         const workspace = swarm?.workspace ?? host.local()?.repository
         if (!workspace) throw new Error('The local Source is not configured; enable it and set its repository first')
         const plan = await (swarm ? trellisOf(host, swarm) : host.trellis).plan({ parent: args.parent, children: args.children })
@@ -191,6 +196,7 @@ export function mainTools(host: MainToolsHost, agent: Agent, swarm?: Swarm): Too
       execute: async args => {
         const local = host.local()
         if (!local) throw new Error('The local Source is not configured; enable it and set its repository first')
+        const swarm = swarmOf()
         const workspace = swarm?.workspace ?? local.repository
         // A swarm's budget counts every Ticket it has owned, ended ones included, and refuses the whole batch before any is created.
         if (swarm) {
@@ -235,6 +241,7 @@ export function mainTools(host: MainToolsHost, agent: Agent, swarm?: Swarm): Too
       description: 'Archive a completed Trellis task after its commit. Trellis updates the task status and moves it to the archive.',
       schema: TrellisArchiveSchema,
       execute: async args => {
+        const swarm = swarmOf()
         const workspace = swarm?.workspace ?? host.local()?.repository
         if (!workspace) throw new Error('The local Source is not configured; enable it and set its repository first')
         const taskDir = localTaskDir(workspace, args.task_dir)
