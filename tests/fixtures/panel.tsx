@@ -36,6 +36,8 @@ export async function settle() {
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
 export async function mount(dictionary: Record<string, string> = zh) {
+  // Page tests mount on their own page; the launcher, which is the app's HOME, is opted into with `at({ page: 'swarms' })`.
+  if (!sessionStorage.getItem('dsh-superagent/route')) at({ page: 'overview' })
   container = document.createElement('div'); document.body.append(container)
   root = createRoot(container)
   await act(async () => { root!.render(<Panel t={translator(dictionary)} />) })

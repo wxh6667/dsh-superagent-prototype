@@ -16,8 +16,9 @@ it('saves this machine\'s settings in the Deployment settings through DSH\'s con
   await click(tab(zh['tab.settings']))
   await click(find(zh['settingsGroup.deployment'], '.dt-settings-link'))
   expect(text()).toContain('/srv/dsh-superagent')
-  // Accounts are on the Source settings; the Plugin Manager page, where those are not at hand, shows them here.
+  // Remote account rows are not part of the Deployment page.
   expect(text()).not.toContain('@agent-bot')
+  expect(text()).not.toContain(zh.deploymentDerived)
   for (const moved of ['仓库克隆', '工单 worktree 目录', '禁用的命令']) expect(text()).not.toContain(moved)
   expect(text()).toContain(zh.deploymentIntro)
   // A limit applies at once, so a draft of one says only that it is unsaved, even while Assignments run.
@@ -64,7 +65,7 @@ it('merges a Deployment draft into the values another page saved meanwhile, and 
   expect(shared.getSnapshot().value).toMatchObject({ admissionContextMaxPages: 20, promptMaxChars: 50000 })
 })
 
-it('renders the Deployment page with the derived accounts in the Plugin Manager, and no summary', async () => {
+it('renders the Deployment page in the Plugin Manager with no summary and no remote account rows', async () => {
   let container = document.createElement('div')
   let root = createRoot(container)
   onTestFinished(() => { act(() => { root.unmount() }); container.remove() })
@@ -82,7 +83,8 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   expect(container.textContent).toBe('')
   server.form = fakeForm().form
   await render('page')
-  for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', '账号在 dsh-superagent 面板的来源设置里修改。']) expect(text()).toContain(fact)
+  expect(text()).toContain(zh.deploymentIntro)
+  for (const fact of ['acme/widgets', '@agent-bot', 'Widgets Bot', zh.deploymentDerived]) expect(text()).not.toContain(fact)
   server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
   await render('page')
   expect(text()).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')

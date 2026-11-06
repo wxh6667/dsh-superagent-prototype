@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type OutboundMessage, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, reasonText, type DomainEvent, type EngineForSettings, type OutboundMessage, type ReceiveResult, type Swarm, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { localKind } from '../sources/local.ts'
@@ -43,6 +43,7 @@ import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions, commandOf } from './sessions.ts'
+import { SwarmManager } from './swarms.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -66,6 +67,7 @@ export class Runtime extends Service implements SourceHost {
   readonly sources: SourceRegistry
   readonly commands: Commands
   readonly sessions: Sessions
+  readonly swarms: SwarmManager
   readonly settings: Settings
   readonly executor: DshExecutor
   readonly assessor: MasterAssessor
@@ -102,8 +104,7 @@ export class Runtime extends Service implements SourceHost {
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
-      const feishu = () => setup.configured() && !!setup.deployment.feishu
-      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       this.trellis = new Trellis({ repository: () => setup.configured() ? setup.deployment.local?.repository ?? '' : '', sessionId: masterId })
@@ -125,15 +126,20 @@ export class Runtime extends Service implements SourceHost {
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
-        lifetime: this.lifetime, commitGuard: execution => this.commitGuard(execution),
+        // Ticket-related messages target their swarm's master; the legacy master is the fallback for absent or unknown swarms.
+        masterFor: swarmId => this.swarms.masterFor(swarmId) ?? (swarmId ? undefined : this.masterId),
+        lifetime: this.lifetime, commitGuard: (execution, sessionId) => this.commitGuard(execution, sessionId),
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent, this.swarms.swarmOf(agent.id)) })
+      this.swarms = new SwarmManager({ store, sessions, workspace: ctx.workspaceRegistry,
+        report: (swarm, error) => ctx.logger.warn('dsh-superagent could not restore swarm %s: %s', swarm.id, String(error)) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+        repliedTo: trigger => repliedTo({ store, sources }, trigger), prepareCommand: ticket => this.prepareCommand(ticket),
+        swarmOf: ticket => ticket.swarmId ? this.swarms.get(ticket.swarmId) : undefined })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
@@ -142,15 +148,21 @@ export class Runtime extends Service implements SourceHost {
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
-        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
-          // Notify the main Session only about domain events it did not initiate itself.
+        outbox,
+        // A local ticket carries its origin trigger's swarm so its worker runs against that swarm; a legacy or remote trigger names none.
+        prepareTicket: (ticket, outcome) => {
+          const swarmId = store.triggers.get(ticket.origin.triggerId)?.meta.swarmId
+          return executor.prepare(typeof swarmId === 'string' ? { ...ticket, swarmId } : ticket, outcome)
+        },
+        emit: event => {
+          // Notify the owning swarm's master Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
-          if (notice) sessions.notify(...notice)
+          if (notice) sessions.notify(notice[0], notice[1], notice[2], this.swarmIdOf(event))
           // A person's message that reached an open ticket is the ticket's; the main Session hears of it in the same transaction,
           // and of one for an ended ticket once it resumes, unless it routed the message there itself.
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
-          if (followup) sessions.relay(followup.id, followup.text)
+          if (followup) sessions.relay(followup.id, followup.text, followup.swarmId)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured() && setup.deployment.github) {
@@ -166,9 +178,8 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
-      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
-        get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
-        local: () => setup.configured() ? setup.deployment.local : undefined, trellis: this.trellis, masterId,
+      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, resources,
+        local: () => setup.configured() ? setup.deployment.local : undefined, trellis: this.trellis, trellisFor: swarm => this.trellisFor(swarm), masterId,
         receive: trigger => engine.receive(trigger),
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
@@ -197,26 +208,49 @@ export class Runtime extends Service implements SourceHost {
   ticketEnvironment(ticket: Ticket): Variable[] {
     const trigger = sourceTrigger(this, ticket)
     const { setup: { deployment }, sources } = this
-    return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
+    // A local ticket runs against its swarm's workspace; a legacy ticket keeps the global local repository.
+    const swarm = ticket.swarmId ? this.swarms.get(ticket.swarmId) : undefined
+    return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {}, ...swarm ? { swarm } : {} })
   }
-  /** Delivers a local Source message into the main Session: a question steers, an acknowledgement or result is a notice. */
+  /** The Trellis a swarm's master plans, archives and commits against: its own workspace, not the global local repository. */
+  private trellisFor(swarm: Swarm): Trellis {
+    return new Trellis({ repository: () => swarm.workspace, sessionId: swarm.masterSessionId })
+  }
+  /** The prepare command a ticket's workspace runs: its swarm's, or the global executor setting for a legacy ticket. */
+  private prepareCommand(ticket: Ticket): string {
+    const swarm = ticket.swarmId ? this.swarms.get(ticket.swarmId) : undefined
+    return swarm && !swarm.legacy ? swarm.prepare : this.store.settings().executor.prepare
+  }
+  /** The owning swarm of a ticket-related event notice: its ticket's swarm, or the trigger's swarm metadata; absent for legacy. */
+  private swarmIdOf(event: DomainEvent): string | undefined {
+    if (event.type === 'ticket.ended' || event.type === 'thread.unsubscribed') return this.store.tickets.get(event.data.ticketId)?.swarmId
+    if (event.type === 'trigger.requeued') {
+      const swarmId = this.store.triggers.get(event.data.triggerId)?.meta.swarmId
+      return typeof swarmId === 'string' ? swarmId : undefined
+    }
+    return undefined
+  }
+  /** Delivers a local Source message into the owning swarm's master Session: a question steers, an acknowledgement or result is a notice. */
   private async deliverLocal(message: OutboundMessage): Promise<'sent' | 'gone' | 'waiting'> {
     const ticket = message.ticketId ? this.store.tickets.get(message.ticketId) : undefined
+    // The ticket's swarm master, or the legacy master when the ticket has no swarm (or an unknown one).
+    const master = this.swarms.masterFor(ticket?.swarmId) ?? this.masterId
     const question = message.kind === 'reply' && ticket?.attention?.question === message.text
     if (question) {
-      try { await this.sessions.prompt(this.masterId, `local:${message.id}`, message.text, 'steer'); return 'sent' }
+      try { await this.sessions.prompt(master, `local:${message.id}`, message.text, 'steer'); return 'sent' }
       catch { return 'waiting' }
     }
     const summary = message.kind === 'acknowledgement' ? 'local acknowledgement' : 'local result'
-    this.sessions.notify(`local:${message.id}`, { text: message.text, kind: message.kind, ticket_id: message.ticketId ?? null }, summary)
+    this.sessions.notify(`local:${message.id}`, { text: message.text, kind: message.kind, ticket_id: message.ticketId ?? null }, summary, ticket?.swarmId)
     return 'sent'
   }
-  /** Refuses a main-Session commit unless the local repository has an in-progress Trellis task. */
-  private commitGuard(execution: { name: string; arguments?: unknown }): string | undefined {
+  /** Refuses a main-Session commit unless the calling master's swarm (or the legacy local repository) has an in-progress Trellis task. */
+  private commitGuard(execution: { name: string; arguments?: unknown }, sessionId?: string): string | undefined {
     const command = commandOf(execution)
     if (!command || !/\bgit\b[^\n;&|]*\bcommit\b/.test(command)) return undefined
-    if (!this.setup.configured() || !this.setup.deployment.local) return undefined
-    try { return trellisCommitGuard(command, this.trellis.currentSync()) }
+    const swarm = sessionId ? this.swarms.swarmOf(sessionId) : undefined
+    if (!swarm && (!this.setup.configured() || !this.setup.deployment.local)) return undefined
+    try { return trellisCommitGuard(command, (swarm ? this.trellisFor(swarm) : this.trellis).currentSync()) }
     catch (error) { return `Cannot verify the Trellis task: ${error instanceof Error ? error.message : String(error)}` }
   }
   checkSetup(): void { this.setup.check() }
@@ -234,9 +268,13 @@ export class Runtime extends Service implements SourceHost {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
     }
+    // A configured local Source has no loop to report readiness, so mark its health entry ready now.
+    const localHealth = this.sources.healthEntries(['local']).get('local')
+    if (localHealth && this.store.settings().sources.local?.enabled) localHealth.set({ state: 'ready', detail: 'Local Source ready' })
     this.sessions.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.swarms.ensureActive()
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -247,8 +285,9 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    const { store, sources, prompts, sessions, settings, engine, executor, swarms, health, machine, masterId, ready, sourceLinks, setup,
+      passes } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, swarms, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

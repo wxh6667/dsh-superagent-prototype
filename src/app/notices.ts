@@ -11,7 +11,7 @@ import { ticketCard } from './cards.ts'
  * A background notice tuple for the main Session: `[name, value, summary]`, where `name` is the coalescing key in
  * `Effects` (a newer notice with the same `name` overwrites an unsent waiting one, rather than permanently deduplicating future notices).
  */
-export type Notice = readonly [name: string, value: Record<string, unknown>, summary: string]
+export type Notice = readonly [name: string, value: Record<string, unknown>, summary: string, swarmId?: string]
 /** Builds a notice for a saved prompt configuration revision, coalescing under `'prompts'`. */
 export const promptsNotice = (revision: number): Notice =>
   ['prompts', { prompt_config_saved: revision, effect: 'next-request', read: `prompts/${revision}` }, `Prompt configuration saved (revision ${revision})`]
@@ -67,17 +67,16 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
   return undefined
 }
 
-/** Builds a background notice when a ticket's worker subscribes to a related thread for context only. */
-export const threadFollowedNotice = (ticketId: string, thread: string, reason: string): Notice =>
-  receiptNotice({ thread_followed: { ticket_id: ticketId, thread, reason },
+/** Builds a background notice when a ticket's worker subscribes to a related thread for context only; `swarmId` names the owning swarm's master. */
+export const threadFollowedNotice = (ticketId: string, thread: string, reason: string, swarmId?: string): Notice =>
+  [key('receipt', randomUUID()), { thread_followed: { ticket_id: ticketId, thread, reason },
     note: 'For context only: its messages reach this ticket and grant nothing.' },
-    `Ticket ${ticketId} follows thread ${thread} for context: ${reason}`)
+    `Ticket ${ticketId} follows thread ${thread} for context: ${reason}`, swarmId]
 
-/** Steering relay payload for the main Session: `id` is the request ID that makes delivery idempotent, and `text` is the message body. */
-export interface Relay { id: string; text: string }
+/** Steering relay payload for the main Session: `id` is the request ID that makes delivery idempotent, `text` is the message body, and `swarmId` names the owning swarm's master. */
+export interface Relay { id: string; text: string; swarmId?: string }
 /** What a follow-up asks of the main Session: nothing but a stop the person asks for, since its ticket's worker decides it. */
-const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work '
-  + '(orchestrator_route kind stop with this trigger_id).'
+const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work.'
 /**
  * Builds a steering relay for a human follow-up trigger that reached at least one live ticket (including an ended ticket
  * that resumed on the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open
@@ -87,21 +86,25 @@ export function followupNotice(store: Store, sources: SourceRegistry, triggerId:
   const trigger = store.triggers.get(triggerId)
   const disposition = store.triggers.disposition(triggerId)
   if (!trigger || !followupOwners(trigger, store).length) return undefined
-  const tickets = disposition!.fanout.flatMap(id => {
+  const live = disposition!.fanout.flatMap(id => {
     const ticket = store.tickets.get(id)
-    const context = disposition!.context?.includes(id) ? { context: true } : {}
-    return ticket && liveTicket(ticket) ? [{ ticket_id: id, title: ticket.title, state: ticketCard(ticket).state, ...context }] : []
+    return ticket && liveTicket(ticket) ? [ticket] : []
   })
-  if (!tickets.length) return undefined
-  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets)
+  if (!live.length) return undefined
+  const tickets = live.map(ticket => ({ ticket_id: ticket.id, title: ticket.title, state: ticketCard(ticket).state,
+    ...disposition!.context?.includes(ticket.id) ? { context: true } : {} }))
+  // The owning swarm of the follow-up: the first live ticket that has one, else the trigger's own swarm metadata.
+  const swarmId = live.find(ticket => ticket.swarmId)?.swarmId
+    ?? (typeof trigger.meta.swarmId === 'string' ? trigger.meta.swarmId : undefined)
+  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets, swarmId)
 }
 /**
  * A person's message that reached tickets, as the main Session hears of it: the message as their workers read it, and the
  * tickets it reached with their state. Their workers decide it; the main Session may only stop the work on it.
  */
 export function followupRelay(message: { trigger_id: string },
-  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean }[]): Relay {
-  return { id: `followup:${message.trigger_id}`, text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets,
+  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean }[], swarmId?: string): Relay {
+  return { id: `followup:${message.trigger_id}`, ...swarmId ? { swarmId } : {}, text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets,
     note: FOLLOWUP_NOTE }) }
 }
 /** Formats a worker report relay for the main Session (truncating summaries over 600 characters behind `ticket/<id>/result`); `replyTo` names the human question trigger it answers. */
@@ -110,7 +113,7 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
   const summary = text.length > 600 ? { summary: text.slice(0, 600), chars: text.length } : { summary: text }
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state, ...replyTo ? { answer_to: replyTo } : {},
     ...summary, read: `ticket/${ticket.id}/result` }
-  return { id: `report:${id}`, text: JSON.stringify(report) }
+  return { id: `report:${id}`, ...ticket.swarmId ? { swarmId: ticket.swarmId } : {}, text: JSON.stringify(report) }
 }
 /**
  * Converts a worker report recorded on `ticket` into a main-Session relay: a question for a person produces a
@@ -121,7 +124,7 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
 export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' | 'summary' | 'question' | 'answers'>): Relay | undefined {
   const asked = report.question ? ticket.attention : undefined
   if (asked) {
-    return { id: `attention:${ticket.id}:${asked.id}`,
+    return { id: `attention:${ticket.id}:${asked.id}`, ...ticket.swarmId ? { swarmId: ticket.swarmId } : {},
       text: JSON.stringify({ kind: 'worker_attention', ticket: brief(ticket), state: report.state, read: `ticket/${ticket.id}/result` }) }
   }
   if (report.state === 'progress' && !report.answers) return undefined

@@ -1,14 +1,16 @@
 # 006 Deployment
 
-Use this guide to install, configure and operate dsh-superagent. It covers accounts, startup checks, upgrades and troubleshooting, building on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md).
+Use this guide to install, configure and operate the local-only dsh-superagent swarm. It covers the launcher, the Local Source, startup checks, activation, upgrades and troubleshooting, building on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md).
+
+> **Local-only.** The bundle mounts only the Local Source and the launcher. The GitHub/Feishu account sections below are retained as dormant design history; do not configure them for this product. Use the **Local repository** section and the launcher.
 
 ## What runs
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
-- **Optional:** a Feishu bot for chat requests.
+- **A local git repository** initialized with Trellis. The launcher binds a new swarm to its absolute path and creates one worker worktree per task.
+- **A model provider** configured for DeepSeek Harness. No GitHub account or Feishu bot is required.
 
-Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
+Plugin configuration holds the state directory and machine limits. Use the panel for the launcher, the Local Source, Policy and Execution settings; the Source status surface shows only the Local Source.
 
 ### Permissions and isolation
 
@@ -26,9 +28,9 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
-## Local repository (optional)
+## Local repository
 
-A deployment can run without GitHub by enabling the **local** Source and pointing it at a local git repository that has already been initialized with Trellis (`trellis init --dsh`). The local Source is off by default; enabling it does not require a GitHub account.
+The local Source is required. Point it at a git repository that has already been initialized with Trellis (`trellis init --dsh`). The launcher reads its absolute path as the default workspace; enabling it does not require a GitHub account.
 
 1. On the local Source card, set the repository's absolute path, the base branch, the verification command (default `scripts/verify.sh`) and the local actor id/name. Add that actor id to the Policy's local allowed list; setup refuses a local actor that is not allowed.
 2. The repository needs `.trellis/scripts/task.py` and `.trellis/.developer`. dsh-superagent does not initialize Trellis; a missing directory is reported as a setup problem.
@@ -39,7 +41,13 @@ A deployment can run without GitHub by enabling the **local** Source and pointin
 
 The local Source's variables are also listed in the worker's execution environment section. A local-only deployment still needs a model provider; GitHub and Feishu can both stay off.
 
+## Activating this build
+
+The running DeepSeek Harness profile loads the bundle at startup. After upgrading a profile that still runs the old GitHub/Feishu bundle, restart that profile once. Startup migrates the database to schema 12, creates the legacy Swarm for historical Tickets, and mounts only the Local Source. Open **Superagent**; the launcher is the first page. Existing archived master Sessions are not needed: create a new swarm with **New**, and open its master from the list. Historical remote Tickets are read-only.
+
 ## Accounts
+
+These account sections are dormant in the local-only product. Skip them. The **Local repository** section above and the launcher are the supported deployment.
 
 ### Agent GitHub account
 

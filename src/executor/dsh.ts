@@ -5,7 +5,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
-import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
+import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Swarm, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import { automatic } from '../core/tickets.ts'
 import type { Machine } from '../deployment.ts'
@@ -77,6 +77,10 @@ export interface ExecutorHost {
   paused(): boolean
   /** Execution environment variables for `ticket`, passed to its workspace prepare command. */
   environment(ticket: Ticket): Variable[]
+  /** The prepare command for `ticket`'s workspace; without it, the global `executor.prepare` setting is used. */
+  prepareCommand?(ticket: Ticket): string
+  /** The swarm that owns `ticket`, when it belongs to one; legacy and unknown ownership keep the global-only behavior. */
+  swarmOf?(ticket: Ticket): Swarm | undefined
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
@@ -132,7 +136,7 @@ export const batchOf = (host: { store: Pick<Store, 'triggers'> }, ticket: Ticket
   .filter(id => id !== ticket.origin.triggerId).flatMap(id => host.store.triggers.get(id) ?? [])
 const RESUMED = 'This ticket ended earlier and the message that follows, on its thread, resumed it under the same mandate. If it asks for '
   + 'more within the original scope, inspect the worktree, git history and PR state and continue; if it asks for work beyond that scope or '
-  + 'for another ticket, hand it back with orchestrator_trigger_handback and report dropped; if it needs nothing, such as thanks, '
+  + 'for another ticket, report blocked and name what it asks for; if it needs nothing, such as thanks, '
   + 'report dropped without a message. Report ready when the follow-up is done. Do not repeat completed work.'
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current worktree, git history and PR state.'
 /** Formats a policy-change input for the worker; inputs recorded before `effect` existed fall back to a general notice. */
@@ -248,7 +252,7 @@ export class DshExecutor implements Executor {
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
     await mkdir(dirname(directory), { recursive: true })
-    const command = this.host.store.settings().executor.prepare.trim()
+    const command = (this.host.prepareCommand?.(ticket) ?? this.host.store.settings().executor.prepare).trim()
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
@@ -272,6 +276,7 @@ export class DshExecutor implements Executor {
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
     if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
+    this.swarmLimit(ticket)
     this.slots.reserve(ticketId, 'launch')
     try { await this.launch(ticket, assignment); this.transient.delete(`launch:${assignmentId}`) }
     catch (error) {
@@ -405,6 +410,17 @@ export class DshExecutor implements Executor {
     }
     await until(stop(), undefined, SHUTDOWN_STOP_MS)
   }
+  /**
+   * Throws `Later` when `ticket`'s swarm already runs its maximum workers, so its launch stays queued as it does when the
+   * global worker slots are full. Legacy and unknown ownership keep the global-only behavior.
+   */
+  private swarmLimit(ticket: Ticket): void {
+    const swarm = this.host.swarmOf?.(ticket)
+    if (!swarm || swarm.legacy || swarm.status !== 'active') return
+    const running = this.host.store.tickets.open().filter(item => item.swarmId === swarm.id && this.running(item)).length
+    if (running >= swarm.budget.maxWorkers)
+      throw new Later(`Swarm ${swarm.id} already runs its maximum of ${swarm.budget.maxWorkers} workers`)
+  }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
@@ -425,7 +441,7 @@ export class DshExecutor implements Executor {
       this.relay(resultRelay(updated, 'failed', summary))
     })
   }
-  private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
+  private relay({ id, text, swarmId }: { id: string; text: string; swarmId?: string }): void { this.host.sessions.relay(id, text, swarmId) }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')

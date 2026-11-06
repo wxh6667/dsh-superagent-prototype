@@ -42,15 +42,16 @@ it('does not navigate after the panel unmounts or a newer request supersedes it'
 it('reopens the page this tab showed last, and the overview for a route that no longer exists', () => {
   remember({ route: { page: 'eval', query: { filter: 'stop' } }, stack: [{ page: 'overview' }] })
   expect(initialLocation()).toEqual({ route: { page: 'eval', query: { filter: 'stop' } }, stack: [{ page: 'overview' }] })
-  // The Eval tab was previously named Policy; a route saved under the old name falls back to overview.
+  // The Eval tab was previously named Policy; a route saved under the old name falls back to the launcher.
   sessionStorage.setItem('dsh-superagent/route', JSON.stringify({ route: { page: 'policy' }, stack: [] }))
-  expect(initialLocation()).toEqual({ route: { page: 'overview' }, stack: [] })
+  expect(initialLocation()).toEqual({ route: { page: 'swarms' }, stack: [] })
   sessionStorage.setItem('dsh-superagent/route', JSON.stringify({ route: { page: 'trigger', id: 'github:1' }, stack: [{ page: 'policy' }, { page: 'trigger' }] }))
   expect(initialLocation().stack).toEqual([{ page: 'trigger' }])
   sessionStorage.setItem('dsh-superagent/route', '{')
-  expect(initialLocation().route).toEqual({ page: 'overview' })
+  expect(initialLocation().route).toEqual({ page: 'swarms' })
 })
 it('reads each page a tab remembered with the parameters it takes, and leaves out what it does not know', () => {
+  expect(parseRoute({ page: 'swarms' })).toEqual({ page: 'swarms' })
   expect(parseRoute({ page: 'trigger', query: { filter: 'nope', trigger: 'e1' } })).toEqual({ page: 'trigger' })
   expect(parseRoute({ page: 'trigger', id: 'github:1', query: { trigger: 'e1', filter: 'recent' } }))
     .toEqual({ page: 'trigger', id: 'github:1', query: { trigger: 'e1' } })

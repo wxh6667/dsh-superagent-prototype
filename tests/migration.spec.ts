@@ -202,7 +202,7 @@ it('changes nothing when one step fails: the database stays at schema 10 as it w
     updatedAt: '2', mandate: mandate({ via: 'listed' }), meta: { sourceTriggerId: 'trig-1', workspace: '/w/fix-1' } }
   // The current settings must validate; an invalid value aborts the migration transaction.
   schema10(path, { settings: { executor: { maxWorkers: 'many' } } }, { ticket: [ticket] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: the settings: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: the settings: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t1'").get()!.value))).toMatchObject({ meta: { workspace: '/w/fix-1' } })
@@ -240,13 +240,14 @@ const opened = (records: Record<string, unknown>) => {
   return new Store(path)
 }
 
-it('writes a prompt version saved before the team sections in them, keeping its skills and auto-merge threshold, and marks it', () => {
+it('writes a prompt version saved before the team sections in them, keeping its skills and dropping the remote threshold, and marks it', () => {
   const store = opened({ ...legacyPrompts(3, { notes: 'Call orchestrator_create_task with event_id, read event/<id>, follow guide/work and guide/release, load dsh-tag-github, cd "$DSH_TAG_DIR".' }) })
-  const prompts = new Prompts(store, () => 100000, () => undefined, () => true)
+  const prompts = new Prompts(store, () => 100000, () => undefined)
   const { config } = prompts.version(3)
   expect(config.communication).toBe(defaultPrompts().communication)
-  expect(config.delivery).toContain('it changes fewer than 350 lines (additions plus deletions);')
-  expect(config.delivery).not.toContain('fewer than 200 lines')
+  // The local delivery default replaces the remote auto-merge text instead of carrying its line threshold.
+  expect(config.delivery).toBe(defaultPrompts().delivery)
+  expect(config.delivery).not.toContain('fewer than 350 lines')
   // Guides that are now fixed or built-in are gone; the team's own skills stay, in current names.
   expect(Object.keys(config.skills)).toEqual(['identities', 'notes'])
   expect(config.skills.notes).toBe('Call orchestrator_route (kind accept) with trigger_id, read trigger/<id>, follow the work section and skill dsh-superagent-release, load dsh-superagent-github, cd "$DSH_SUPERAGENT_DIR".')
@@ -264,7 +265,7 @@ it('writes saved team sections and skills under current names: earlier project n
     skills: { notes: 'Load dsh-freelancer-github; cd "$DSH_FREELANCER_DIR". List with orchestrator_tickets, then orchestrator_ticket_inspect.',
       routing: 'Accept with orchestrator_ticket_accept; stop with orchestrator_ticket_stop, never orchestrator_trigger_ignore.' } }
   const store = opened({ 'prompt-version:1': { revision: 1, previousRevision: 0, savedAt: '', source: 'web', config }, 'prompt-revision': 1, 'prompt-settings-text': 1 })
-  const { config: current } = new Prompts(store, () => 100000, () => undefined, () => true).current()
+  const { config: current } = new Prompts(store, () => 100000, () => undefined).current()
   expect(current.delivery).toBe('Merge with --repo $DSH_SUPERAGENT_GITHUB_REPOSITORY.')
   expect(current.skills.notes).toBe('Load dsh-superagent-github; cd "$DSH_SUPERAGENT_DIR". List with orchestrator_read tickets, then orchestrator_read ticket/<id>.')
   // The four routing tools are one.
@@ -272,29 +273,16 @@ it('writes saved team sections and skills under current names: earlier project n
   store.close()
 })
 
-it('writes the removed auto-merge threshold and member identities into the prompts as one new version, unless an earlier version did', () => {
+it('drops removed auto-merge and cross-Source identity settings without writing them into the prompts', () => {
   const before = { policy: { autoMergeLineLimit: 350, members: [{ name: 'Alice', feishuId: 'ou_alice', github: 'alice' }, { name: 'Bob', feishuId: 'ou_bob', github: '' }] } }
   const store = opened({ 'settings-before-9': before })
-  const prompts = new Prompts(store, () => 100000, () => undefined, () => true)
-  const migrated = prompts.current()
-  expect(migrated).toMatchObject({ revision: 1, previousRevision: 0, source: 'settings-migration' })
-  expect(migrated.config.delivery).toContain('it changes fewer than 350 lines (additions plus deletions);')
-  expect(migrated.config.skills.identities).toContain('- Alice (Feishu ou_alice) is @alice on GitHub')
-  expect(migrated.config.skills.identities).not.toContain('Bob')
+  const prompts = new Prompts(store, () => 100000, () => undefined)
+  const current = prompts.current()
+  expect(current.revision).toBe(0)
+  expect(current.config.delivery).toBe(defaultPrompts().delivery)
+  expect(current.config.skills).not.toHaveProperty('identities')
   expect(store.get('settings-before-9')).toBeUndefined()
   store.close()
-  // The default threshold and nobody with two identities change nothing; other delivery text gains the threshold as its own sentence.
-  const unchanged = opened({ 'settings-before-9': { policy: { members: [{ name: 'Bob', feishuId: 'ou_bob', github: '' }] } } })
-  expect(new Prompts(unchanged, () => 100000, () => undefined, () => true).current().revision).toBe(0)
-  unchanged.close()
-  const own = opened({ 'settings-before-9': { policy: { autoMergeLineLimit: 80 } }, 'prompt-revision': 1,
-    'prompt-version:1': { revision: 1, previousRevision: 0, savedAt: '', source: 'panel', config: { ...defaultPrompts(), delivery: 'Deliver PRs.' } } })
-  expect(new Prompts(own, () => 100000, () => undefined, () => true).current().config.delivery)
-    .toBe('Deliver PRs.\nEnable auto-merge only on a PR that changes fewer than 80 lines (additions plus deletions).')
-  own.close()
-  const done = opened({ 'settings-before-9': before, 'prompt-settings-text': 1 })
-  expect(new Prompts(done, () => 100000, () => undefined, () => true).current().revision).toBe(0)
-  done.close()
 })
 
 it('reads a current prompt version that does not read as the one before it, keeping what it said', () => {
@@ -302,7 +290,7 @@ it('reads a current prompt version that does not read as the one before it, keep
   const store = opened({ 'prompt-revision': 2, 'prompt-settings-text': 1,
     'prompt-version:1': { revision: 1, previousRevision: 0, savedAt: '', source: 'web', config },
     'prompt-version:2': { revision: 2, previousRevision: 1, savedAt: '', source: 'web', config: { delivery: ['not text'] } } })
-  const prompts = new Prompts(store, () => 100000, () => undefined, () => true)
+  const prompts = new Prompts(store, () => 100000, () => undefined)
   expect(prompts.current()).toMatchObject({ revision: 2, config, legacy: { config: { delivery: ['not text'] } } })
   expect(prompts.history(0, 2).revisions.map(version => version.changed)).toEqual([['legacy'], []])
   store.close()
@@ -475,7 +463,7 @@ it('names the ticket it stopped at when a ticket does not read, and leaves the d
   const path = join(directory, 'db.sqlite')
   const { inputs: _inputs, ...broken } = ticket10('t9')
   schema10(path, {}, { ticket: [broken] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: ticket t9: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: ticket t9: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t9'").get()!.value))).toEqual(broken)

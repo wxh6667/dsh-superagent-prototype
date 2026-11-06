@@ -13,6 +13,7 @@ import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, s
   type Tab } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
+import { SwarmsPage } from './swarms.tsx'
 import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers } from './text.ts'
 import { ThreadPage } from './thread.tsx'
 import { TicketPage } from './ticket.tsx'
@@ -98,8 +99,8 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   </div>
 }
 
-function Header({ masterId }: { masterId: string | undefined }) {
-  const { t, call, openSession, notify } = usePanel()
+function Header() {
+  const { t, call, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -131,8 +132,6 @@ function Header({ masterId }: { masterId: string | undefined }) {
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
-      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
-        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>
@@ -146,6 +145,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
   const page = (() => {
     switch (route.page) {
+      case 'swarms': return <SwarmsPage />
       case 'overview': return <OverviewPage />
       case 'source': return <SourceStatus />
       case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
@@ -160,7 +160,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   })()
   return <div className="dt-page">
     <div className="dt-column">
-      <Header masterId={state?.masterId} />
+      <Header />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
       <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page} onChange={openTab}
         items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />

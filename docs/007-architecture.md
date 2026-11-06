@@ -228,7 +228,7 @@ A Policy-version change calculates `policyEffects`, records which Tickets were n
 
 `builtInParts` lists override keys, roles, default text and required template placeholders. Each override stores team `text` and a `base`: the `builtInBase` key of its original default. Saves preserve that default under `KV.prompts.builtIn`. `defaultChanged` then reports changed defaults, their old text when available, and removed parts.
 
-Validation inherits an omitted base from the saved override, drops removed parts already present in saved data, and rejects blank text or other unknown keys. This allows the save tool to round-trip a configuration it read. `environmentSection` and `policySection` substitute template values once, using own keys only. Configurations without overrides use defaults.
+Validation inherits an omitted base from the saved override, drops removed parts already present in saved data, and rejects blank text or other unknown keys. This allows the save tool to round-trip a configuration it read. `environmentSection` substitutes template values once, using own keys only. Configurations without overrides use defaults. The assembled parts are the local roles, the three team sections, dispatch or work, handoff and the execution environment; Source skills and the proactive Policy section are not assembled.
 
 ### Sessions
 
@@ -282,7 +282,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 - Runtime sends `pullEndNotices` for merged or closed Tickets.
 - Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
 - MasterAssessor reads repository files with `readRepositoryPath`.
-- Sessions and Prompts register built-in skills only for GitHub and Feishu. Migration converts their schema-10 records.
+- Sessions and Prompts register only team skills; the packaged Source skills are not loaded. Migration converts their schema-10 records.
 - Setup probes only GitHub and Feishu account fields (`SETUP_FIELDS`). Only those Sources receive account setup problems through `SourceContext.problem`.
 
 
@@ -299,6 +299,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
+| `src/core/swarm.ts` | The Swarm aggregate: a goal-scoped batch with its mission, workspace, budget, status, master Session and legacy marker, and `LEGACY_SWARM_ID` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
 | `src/core/part.ts` | `EnginePart`, the base of the Engine's parts, and `EngineOptions` |
@@ -328,8 +329,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
 | `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
-| `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
+| `src/app/skill-files.ts` | Packaged prompt text: `promptFile`, which joins a file's one-sentence lines into paragraphs |
 | `src/app/sessions.ts` | Sessions |
+| `src/app/swarms.ts` | The SwarmManager: creates, lists, opens and completes swarms, and keeps active swarms' master Sessions reachable |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
@@ -348,7 +350,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
 | `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page, the Mandate basis facts and the Executor's load |
 | `src/app/views/threads.ts` | The Thread lists, a Thread's timeline, the search and the Decision list |
-| `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
+| `src/app/views/sources.ts` | The Source status: the Local Source's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
@@ -364,12 +366,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/local.ts` | The local Source kind: configuration, admission, environment variables and display facts for local requests |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What GitHub and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
-| `src/sources/github.ts` | The GitHub kind and plugin entry, exported as `./github-watch`: a poll round of notifications, the pull requests of open Tickets with their CI, and subscribed Threads |
+| `src/sources/github.ts` | The GitHub kind, a dormant adapter that is not a bundle entry: a poll round of notifications, the pull requests of open Tickets with their CI, and subscribed Threads |
 | `src/sources/github-trigger.ts` | GitHub comments, reviews, Issue bodies and CI changes as Triggers, and GitHub addresses |
 | `src/sources/github-pull.ts` | The pull request rules: which pull requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and `pullEndNotices`, the chat notice of a Ticket that ended merged or closed |
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
-| `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
+| `src/sources/feishu.ts` | The Feishu kind, a dormant adapter that is not a bundle entry |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
@@ -381,6 +383,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
+| `src/client/swarms.tsx` | The Swarm launcher: the New swarm brief, active and completed swarms with their workspace, budget and master, and Open and Finish |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
@@ -399,7 +402,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts` and `src/sources/feishu.ts` remain internal adapters for their tests, but they are no longer built by `tsdown.config.ts` or exported by `package.json`. The bundle's `cordis.patch.yml` inserts only `dsh-superagent` and the two agent presets; Runtime registers the Local Source.
 
 ## Tests
 
@@ -421,7 +424,6 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed |
 | `tests/cache.spec.ts` | `TextCache` |
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
-| `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
@@ -432,16 +434,19 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
+| `tests/migration.spec.ts` | The schema 10 through 12 migration: every stored record in its current shape, the legacy swarm, and the refusal of older schemas |
+| `tests/swarm.spec.ts` | The Swarm repository and the schema 11 to 12 migration: a fresh database, the legacy swarm, owned historical Tickets and idempotent reopen |
+| `tests/swarms.spec.ts` | The SwarmManager on a real Store: creation validation, master ensure/unarchive, listing, the open and finish lifecycle, startup repair of active swarms, and master resolution for active tickets |
+| `tests/notices.spec.ts` | Notices and relays carry their owning swarm: result, report/attention and follow-up relays, the trigger-metadata fallback, and the legacy empty case |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
-| `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/trellis.spec.ts` | The Trellis adapter: parent/child creation and artifacts, session-scoped start, archive, current task, and task-path validation |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
+| `tests/panel-swarms.spec.tsx` | The Swarm launcher: active and completed swarms, the brief form, opening the returned master, finishing, and its refusals |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
@@ -541,7 +546,7 @@ Routing results use `{decision?, reason, ticket?}`. `orchestrator_route` returns
 
 Settings and prompt saves return the saved configuration. Policy sync returns the Source, allowed-list size, and `added` and `removed` names.
 
-`orchestrator_eval` returns context rather than instructions. Assessment instructions live in `runtime/admission` (`prompts/admission.md`), and rules in `runtime/policy`. Its context includes:
+`orchestrator_eval` returns context rather than instructions. The local assembled prompt no longer includes assessment or Policy sections; proactive rules remain settings for the remote tool path until the remote Sources are removed. Its context includes:
 
 - The Trigger text, up to 4,000 characters, with image ids and other Triggers in the batch.
 - Up to eight `related_tickets`, open ones first, and `tickets_total`.
@@ -599,11 +604,9 @@ Workers receive assignments and Inputs inline. The first message includes the ti
 
 ### Panel-only actions
 
-There is no tool for dismissing an unavailable Decision, rerunning setup, refreshing Source display names, or sending an Executor-owned human follow-up to Eval. The last action is deliberately refused by `orchestrator_trigger_requeue`. Other panel actions have equivalent tools.
+The local tool surface has no remote candidate, Eval, PR or thread-handoff tools; those entry points are retired. Most built-in instructions live in `prompts/*.md`, with one sentence per line joined by `promptFile`. Only the local prompt parts are loaded: the roles, the team sections, dispatch or work, handoff and the execution environment. `prompts/admission.md`, `prompts/subscriptions.md`, `prompts/replies.md` and the Source skills remain packaged but dormant. Tool descriptions and fixed notices such as restart recovery notes remain in code.
 
-Most built-in instructions live in `prompts/*.md`, with one sentence per line joined by `promptFile`. Source skills live in `skills/dsh-superagent-*/SKILL.md`. Tool descriptions and fixed notices such as restart recovery notes remain in code. Assessment instructions live only in `prompts/admission.md`.
-
-`tests/model-surface.spec.ts` checks these surfaces for drift. [004 Prompts](004-prompts.md) explains the team's editable parts.
+`tests/prompts.spec.ts` and `tests/cards.spec.ts` check the assembled local surfaces for drift. [004 Prompts](004-prompts.md) explains the team's editable parts.
 
 ## Configuration reload
 

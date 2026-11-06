@@ -4,7 +4,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { dirname } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -14,7 +13,6 @@ import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
-import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
@@ -30,10 +28,12 @@ export interface SessionsHost {
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
   readonly masterId: string
+  /** The master Session that owns `swarmId`, or `undefined` when it has none so the legacy master is the fallback. */
+  readonly masterFor?: (swarmId?: string) => string | undefined
   readonly lifetime: AbortSignal
   closing(): boolean
-  /** Refuses a main-Session command that must not run, such as a commit without an active Trellis task. */
-  readonly commitGuard?: (execution: { name: string; arguments?: unknown }) => string | undefined
+  /** Refuses a command of the Session `sessionId` (when named) that must not run, such as a commit without an active Trellis task. */
+  readonly commitGuard?: (execution: { name: string; arguments?: unknown }, sessionId?: string) => string | undefined
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
@@ -135,6 +135,8 @@ function noWait({ name, arguments: input }: { name: string; arguments: unknown }
  */
 export class Sessions {
   private readonly agentDelivery: AgentDelivery
+  /** Master Session ids registered through `ensure(..., 'orchestrator')`; the legacy `host.masterId` stays a master too. */
+  private readonly masters = new Set<string>()
   /** Decorated agents mapped to their registered disposers and skill scope until the agent is disposed or `Sessions.dispose()` runs. */
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
@@ -143,9 +145,9 @@ export class Sessions {
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
     this.agentDelivery = new AgentDelivery(host.context)
-    // Deliver relays and notices to the main Session in the order they were queued.
-    host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'), { ordered: true })
-    host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
+    // Deliver relays and notices to the owning swarm's master Session, or the legacy master, in the order they were queued.
+    host.effects.handle('relay', ({ text, swarmId }, requestId) => this.prompt(this.masterFor(swarmId), requestId, text, 'steer'), { ordered: true })
+    host.effects.handle('notice', ({ value, summary, swarmId }, name) => this.inject(name, value, summary, swarmId), { ordered: true })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
@@ -167,7 +169,7 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = this.isMaster(sessionId) ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -179,6 +181,8 @@ export class Sessions {
   }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
+    // Register before any await so the `agent/created` decoration already treats this Session as a master.
+    if (role === 'orchestrator') this.masters.add(id)
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
@@ -196,6 +200,14 @@ export class Sessions {
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
+  /** Ensures the master Session of a swarm; the bounded call the SwarmManager uses. */
+  async ensureMaster(id: string, cwd: string, title: string): Promise<Agent> {
+    return this.ensure(id, cwd, title, 'orchestrator')
+  }
+  /** Whether `sessionId` is a registered master Session, including the legacy single master. */
+  isMaster(sessionId: string): boolean {
+    return this.masters.has(sessionId) || sessionId === this.host.masterId
+  }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
@@ -210,18 +222,20 @@ export class Sessions {
   }
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
-  /** Enqueues a steering relay to the main Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
-  relay(requestId: string, text: string): void { this.host.effects.enqueue('relay', requestId, { text }) }
-  /** Enqueues a durable background notice for injection into the main Session; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
-  notify(name: string, value: Record<string, unknown>, summary: string): void { this.host.effects.enqueue('notice', name, { value, summary }) }
+  /** The Session a swarm-related message targets: the owning swarm's master, or the legacy master when it names none. */
+  private masterFor(swarmId?: string): string { return this.host.masterFor?.(swarmId) ?? this.host.masterId }
+  /** Enqueues a steering relay to the owning swarm's master Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
+  relay(requestId: string, text: string, swarmId?: string): void { this.host.effects.enqueue('relay', requestId, { text, swarmId }) }
+  /** Enqueues a durable background notice for injection into the owning swarm's master Session; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
+  notify(name: string, value: Record<string, unknown>, summary: string, swarmId?: string): void { this.host.effects.enqueue('notice', name, { value, summary, swarmId }) }
   /** Waits for currently runnable `notice` effects to settle and returns `'injected'` if notice `name` has reached the main Session or `'pending'` if it is still queued. */
   async delivery(name: string): Promise<'injected' | 'pending'> {
     await this.host.effects.idle('notice')
     return this.host.effects.pending('notice', name) ? 'pending' : 'injected'
   }
-  /** Injects a notice into the main Session without waking it; no-op if the main Session does not exist yet. */
-  private async inject(name: string, value: Record<string, unknown>, summary: string): Promise<void> {
-    const resolved = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
+  /** Injects a notice into the owning swarm's master Session without waking it; no-op if that Session does not exist yet. */
+  private async inject(name: string, value: Record<string, unknown>, summary: string, swarmId?: string): Promise<void> {
+    const resolved = await this.ctx.sessionController.resolveAgent(this.masterFor(swarmId) as SessionId)
     if ('error' in resolved) return
     // Deduplicate by notice name and payload hash so retries are idempotent while updated payloads still deliver.
     const text = JSON.stringify(value)
@@ -275,7 +289,7 @@ export class Sessions {
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
     const host = this.host
-    const master = agent.id === host.masterId
+    const master = this.isMaster(agent.id)
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
@@ -304,7 +318,7 @@ export class Sessions {
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill', 'ask_user_question'] }),
-        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent)) ?? this.host.commitGuard?.(execution)))
+        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent)) ?? this.host.commitGuard?.(execution, agent.id)))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
@@ -370,11 +384,8 @@ export class Sessions {
     previous?.dispose()
     const disposers: (() => void)[] = []
     for (const [name, content] of this.host.prompts.skills(version.config)) {
-      const bundled = name === 'feishu' || name === 'github' ? bundledSkills[name] : undefined
-      const body = version.config.skills[name] ?? ''
-      const description = bundled?.description ?? (body.replace(/\s+/g, ' ').slice(0, 120) || 'Custom dsh-superagent operational skill.')
-      disposers.push(scope.skills.register({ name: `${SKILL_PREFIX}${name}`, description, content, source: 'runtime',
-        ...(bundled ? { resourceBase: { kind: 'directory' as const, path: dirname(bundled.path) } } : {}) }))
+      const description = content.replace(/\s+/g, ' ').slice(0, 120) || 'Custom dsh-superagent operational skill.'
+      disposers.push(scope.skills.register({ name: `${SKILL_PREFIX}${name}`, description, content, source: 'runtime' }))
     }
     binding.skills = { revision: version.revision, dispose: () => { disposers.forEach(dispose => dispose()) } }
   }

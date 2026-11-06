@@ -27,7 +27,7 @@ export function settingsView(store: Store, sources: SourceRegistry, health: Heal
     policyVersion: policyVersion(settings),
     blocks: { policy: block('policy', settings.policy), eval: block('eval', settings.eval), executor: block('executor',
       settings.executor) },
-    sources: sources.instances(settings).map(instance => {
+    sources: sources.instances(settings).filter(instance => instance.kind === 'local').map(instance => {
       const kind = sources.kind(instance.kind)
       const problem = problemOf(instance.id, setup)
       const { id, title } = sourceHealth(sources, instance, health)

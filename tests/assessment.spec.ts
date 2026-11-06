@@ -2,7 +2,6 @@
 import { expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AssessmentSchema, EvalReadSchema, MasterAssessor, type AssessorHost } from '../src/app/assessment.ts'
-import { mainAdmissionPolicy } from '../src/app/context.ts'
 import { Engine, MemoryRepositories, type Executor, type Policy, type Trigger } from '../src/core/index.ts'
 import type { Commands } from '../src/infra/commands.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -123,7 +122,6 @@ it('routes an explicit candidate instead of assessing it: each eval tool names t
 })
 
 it('asks the assessment only for decisions its tool accepts, which no longer include reopen or stop', () => {
-  expect(mainAdmissionPolicy).not.toMatch(/reopen|decision=stop/)
   const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'e' }
   const result = (decision: string, extra = {}) =>
     AssessmentSchema.safeParse({ decision, rule_assessments: [], direction, title: 't', scope: 's', reason: 'r', ...extra }).success

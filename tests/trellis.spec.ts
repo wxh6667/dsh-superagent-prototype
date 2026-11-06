@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mainTools, type MainToolsHost } from '../src/app/tools/main.ts'
 import { workerCommitGuard } from '../src/app/sessions.ts'
+import type { Swarm, Ticket } from '../src/core/index.ts'
 import { Trellis, slugify, trellisCommitGuard } from '../src/infra/trellis.ts'
 
 let dir: string
@@ -73,17 +74,29 @@ describe('Trellis adapter', () => {
   })
 })
 
+const swarmFixture = (workspace: string): Swarm => ({
+  id: 'swarm-1', title: 'Swarm', mission: 'Mission', workspace, verify: 'scripts/verify.sh', prepare: '',
+  budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 }, status: 'active', masterSessionId: 'orchestrator-swarm-1',
+  createdAt: '2026-10-01T00:00:00.000Z',
+})
 describe('main Session local tools', () => {
-  function tools() {
+  const ownedTicket = (id: string, swarmId: string, ended = false): Ticket => ({
+    id, swarmId, ...ended ? { ended: { at: '2026-10-02T00:00:00.000Z', by: 'executor', outcome: 'completed' } } : {},
+  } as Ticket)
+  function tools(swarm?: Swarm, existing: Ticket[] = []) {
+    const trellis = { plan: vi.fn(async () => ({ parent: { dir: '/p', title: 'Parent' }, children: [] })), archive: vi.fn() }
+    const swarmTrellis = { plan: vi.fn(async () => ({ parent: { dir: '/s', title: 'Swarm parent' }, children: [] })), archive: vi.fn() }
+    const trellisFor = vi.fn(() => swarmTrellis)
     const host = {
       context: { logger: { warn: vi.fn() } },
       engine: { decide: vi.fn(() => ({ kind: 'accept', ticketId: 't1', reason: { code: 'explicitRouted' } })) },
-      store: { tickets: { get: () => undefined } }, prompts: {}, sessions: {}, settings: {}, assessor: {}, resources: {},
+      store: { tickets: { get: (id: string) => existing.find(ticket => ticket.id === id), list: () => existing } },
+      prompts: {}, sessions: {}, settings: {}, assessor: {}, resources: {},
       local: () => ({ repository: repo, baseBranch: 'main', verify: 'scripts/verify.sh', actor: 'local-user', actorName: 'Local user' }),
-      trellis: { plan: vi.fn(async () => ({ parent: { dir: '/p', title: 'Parent' }, children: [] })), archive: vi.fn() },
+      trellis, trellisFor,
       masterId: 'session-1', receive: vi.fn(() => 'stored'), requestPass: vi.fn(), sendReplies: vi.fn(), quietly: (run: () => unknown) => run(),
     } as unknown as MainToolsHost
-    return { host, tools: mainTools(host, { id: 'master' } as never) }
+    return { host, tools: mainTools(host, { id: 'master' } as never, swarm), trellis, swarmTrellis, trellisFor }
   }
   it('creates a plan without creating Tickets', async () => {
     const { host, tools: list } = tools()
@@ -105,13 +118,102 @@ describe('main Session local tools', () => {
     expect(host.receive).toHaveBeenCalledTimes(2)
     expect(host.engine.decide).toHaveBeenCalledTimes(2)
     expect(host.receive).toHaveBeenNthCalledWith(1, expect.objectContaining({ source: 'local', human: true, addressed: 'direct',
-      threads: [{ source: 'local', id: 'local:session-1:11-05-local-work' }], channel: expect.objectContaining({ source: 'local' }) }))
-    expect(host.receive).toHaveBeenNthCalledWith(2, expect.objectContaining({ threads: [{ source: 'local', id: 'local:session-1:11-05-other-work' }] }))
+      threads: [{ source: 'local', id: 'local:session-1:11-05-local-work' }], channel: expect.objectContaining({ source: 'local' }),
+      meta: { task_dir: first, repository: repo } }))
+    expect(host.receive).toHaveBeenNthCalledWith(2, expect.objectContaining({ threads: [{ source: 'local', id: 'local:session-1:11-05-other-work' }],
+      meta: { task_dir: second, repository: repo } }))
     expect(host.engine.decide).toHaveBeenNthCalledWith(1, expect.any(String), expect.objectContaining({ kind: 'accept', title: 'Local work',
       name: 'local-work', reason: { code: 'explicitRouted' } }))
     expect(host.engine.decide).toHaveBeenNthCalledWith(2, expect.any(String), expect.objectContaining({ title: 'Other work', name: 'other-work' }))
     expect(result).toMatchObject({ results: [{ decision: 'accept' }, { decision: 'accept' }] })
     expect(host.requestPass).toHaveBeenCalled()
+  })
+  it('uses the calling swarm\'s Trellis for plan and archive instead of the legacy one', async () => {
+    const workspace = join(dir, 'swarm-workspace')
+    mkdirSync(join(workspace, '.trellis', 'tasks'), { recursive: true })
+    const swarm = swarmFixture(workspace)
+    const { host, tools: list, trellis, swarmTrellis, trellisFor } = tools(swarm)
+    const plan = list.find(tool => tool.name === 'orchestrator_trellis_plan')!
+    const planned = await plan.execute({ parent: { title: 'Parent', description: 'Parent', prd: '# P' }, children: [] }, new AbortController().signal)
+    expect(trellisFor).toHaveBeenCalledWith(swarm)
+    expect(swarmTrellis.plan).toHaveBeenCalledWith({ parent: { title: 'Parent', description: 'Parent', prd: '# P' }, children: [] })
+    expect(trellis.plan).not.toHaveBeenCalled()
+    expect(planned).toMatchObject({ parent: { dir: '/s', title: 'Swarm parent' }, repository: workspace })
+    const taskDir = join(workspace, '.trellis', 'tasks', '11-05-swarm-work')
+    const archive = list.find(tool => tool.name === 'orchestrator_trellis_archive')!
+    await expect(archive.execute({ task_dir: taskDir }, new AbortController().signal)).resolves.toEqual({ archived: taskDir })
+    expect(swarmTrellis.archive).toHaveBeenCalledWith(taskDir)
+    expect(trellis.archive).not.toHaveBeenCalled()
+  })
+  it('dispatches a swarm\'s tasks into its workspace with the swarm thread key and metadata, refusing tasks outside it', async () => {
+    const workspace = join(dir, 'swarm-workspace')
+    mkdirSync(join(workspace, '.trellis', 'tasks'), { recursive: true })
+    const swarm = swarmFixture(workspace)
+    const { host, tools: list } = tools(swarm)
+    const dispatch = list.find(tool => tool.name === 'orchestrator_local_dispatch')!
+    const taskDir = join(workspace, '.trellis', 'tasks', '11-05-swarm-work')
+    const outside = join(repo, '.trellis', 'tasks', '11-05-outside')
+    const result = await dispatch.execute({ tasks: [
+      { task_dir: taskDir, title: 'Swarm work', acknowledgement: 'On it' },
+      { task_dir: outside, title: 'Outside work', acknowledgement: 'On it too' },
+    ] }, new AbortController().signal)
+    expect(host.receive).toHaveBeenCalledTimes(1)
+    expect(host.receive).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'local', human: true, addressed: 'direct',
+      threads: [{ source: 'local', id: 'local:swarm-1:11-05-swarm-work' }],
+      channel: expect.objectContaining({ source: 'local', thread: 'local:swarm-1:11-05-swarm-work' }),
+      meta: { task_dir: taskDir, repository: workspace, swarmId: 'swarm-1' },
+    }))
+    expect(host.engine.decide).toHaveBeenCalledTimes(1)
+    expect(host.engine.decide).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: 'accept', title: 'Swarm work', name: 'swarm-work' }))
+    expect(result).toMatchObject({ results: [
+      { task_dir: taskDir, decision: 'accept' },
+      { task_dir: outside, refused: expect.stringContaining('Not a Trellis task') },
+    ] })
+  })
+  it('refuses a swarm dispatch that would exceed maxTasks before creating any Ticket', async () => {
+    const workspace = join(dir, 'swarm-workspace')
+    mkdirSync(join(workspace, '.trellis', 'tasks'), { recursive: true })
+    const swarm = { ...swarmFixture(workspace), budget: { maxTasks: 2, maxWorkers: 2, maxRounds: 3 } }
+    // Ended tickets count too; another swarm's ticket does not.
+    const { host, tools: list } = tools(swarm, [ownedTicket('t-old', swarm.id, true), ownedTicket('t-other', 'other')])
+    const dispatch = list.find(tool => tool.name === 'orchestrator_local_dispatch')!
+    const first = join(workspace, '.trellis', 'tasks', '11-05-one')
+    const second = join(workspace, '.trellis', 'tasks', '11-05-two')
+    await expect(dispatch.execute({ tasks: [
+      { task_dir: first, title: 'One', acknowledgement: 'On it' },
+      { task_dir: second, title: 'Two', acknowledgement: 'On it too' },
+    ] }, new AbortController().signal)).rejects.toThrow('at most 2 tasks')
+    expect(host.receive).not.toHaveBeenCalled()
+    expect(host.engine.decide).not.toHaveBeenCalled()
+    expect(host.requestPass).not.toHaveBeenCalled()
+  })
+  it('dispatches a swarm batch that fits its maxTasks budget', async () => {
+    const workspace = join(dir, 'swarm-workspace')
+    mkdirSync(join(workspace, '.trellis', 'tasks'), { recursive: true })
+    const swarm = { ...swarmFixture(workspace), budget: { maxTasks: 2, maxWorkers: 2, maxRounds: 3 } }
+    const { host, tools: list } = tools(swarm, [ownedTicket('t-old', swarm.id, true)])
+    const dispatch = list.find(tool => tool.name === 'orchestrator_local_dispatch')!
+    const taskDir = join(workspace, '.trellis', 'tasks', '11-05-one')
+    const result = await dispatch.execute({ tasks: [
+      { task_dir: taskDir, title: 'One', acknowledgement: 'On it' },
+    ] }, new AbortController().signal)
+    expect(host.receive).toHaveBeenCalledTimes(1)
+    expect(host.engine.decide).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ results: [{ task_dir: taskDir, decision: 'accept' }] })
+  })
+  it('keeps a legacy dispatch free of swarm budget checks', async () => {
+    const { host, tools: list } = tools(undefined, ['a', 'b', 'c', 'd'].map(id => ownedTicket(id, 'some-swarm', true)))
+    const dispatch = list.find(tool => tool.name === 'orchestrator_local_dispatch')!
+    const first = join(repo, '.trellis', 'tasks', '11-05-one')
+    const second = join(repo, '.trellis', 'tasks', '11-05-two')
+    const result = await dispatch.execute({ tasks: [
+      { task_dir: first, title: 'One', acknowledgement: 'On it' },
+      { task_dir: second, title: 'Two', acknowledgement: 'On it too' },
+    ] }, new AbortController().signal)
+    expect(host.receive).toHaveBeenCalledTimes(2)
+    expect(host.engine.decide).toHaveBeenCalledTimes(2)
+    expect(result).toMatchObject({ results: [{ decision: 'accept' }, { decision: 'accept' }] })
   })
 })
 

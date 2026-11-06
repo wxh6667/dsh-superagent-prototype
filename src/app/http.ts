@@ -2,9 +2,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { isAbsolute } from 'node:path'
 import { z } from 'zod'
-import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
-import { sourceSkills } from './context.ts'
+import { LIMITS } from '../limits.ts'
+import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams, type SwarmBriefInput } from './api.ts'
+import type { SwarmManager } from './swarms.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
   from './prompts.ts'
@@ -37,6 +39,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
+  readonly swarms: Pick<SwarmManager, 'create' | 'open' | 'finish'>
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
   readonly machine: Machine
@@ -132,7 +135,7 @@ function promptsView(runtime: HttpHost, revision: number | undefined, offset: nu
   // built-in text changed since, the text they were edited from when known.
   const parts = Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) }))
   return { masterId: runtime.masterId, current: shown, defaults: defaultPrompts(), sections: TEAM_SECTIONS, skillName: SKILL_NAME.source,
-    builtin: Object.keys(sourceSkills), skillPrefix: SKILL_PREFIX, parts, defaultChanged: runtime.prompts.defaultChanged(shown.config),
+    builtin: [] as string[], skillPrefix: SKILL_PREFIX, parts, defaultChanged: runtime.prompts.defaultChanged(shown.config),
     ...runtime.sessions.status(), ...runtime.prompts.history(offset) }
 }
 export type PromptsView = ReturnType<typeof promptsView>
@@ -153,6 +156,43 @@ const PromptsQuery = z.object({ revision: count.optional(), offset: count.defaul
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
+const SwarmBudgetInput = z.object({
+  maxTasks: z.number().int().min(LIMITS.swarm.maxTasks.min, 'maxTasks must be at least 1')
+    .max(LIMITS.swarm.maxTasks.max, 'maxTasks is too large'),
+  maxWorkers: z.number().int().min(LIMITS.swarm.maxWorkers.min, 'maxWorkers must be at least 1')
+    .max(LIMITS.swarm.maxWorkers.max, 'maxWorkers is too large'),
+  maxRounds: z.number().int().min(LIMITS.swarm.maxRounds.min, 'maxRounds must be at least 1')
+    .max(LIMITS.swarm.maxRounds.max, 'maxRounds is too large'),
+}).partial()
+const SwarmBrief = z.object({
+  title: z.string().trim().min(1, 'A swarm needs a title').max(LIMITS.swarm.title),
+  mission: z.string().trim().min(1, 'A swarm needs a mission').max(LIMITS.swarm.mission),
+  acceptance: z.string().trim().max(LIMITS.swarm.acceptance).optional(),
+  scope: z.string().trim().max(LIMITS.swarm.scope).optional(),
+  workspace: z.string().trim().min(1, 'An absolute workspace path is required')
+    .refine(isAbsolute, 'An absolute workspace path is required'),
+  verify: z.string().trim().max(LIMITS.swarm.verify).optional().transform(value => value || 'scripts/verify.sh'),
+  prepare: z.string().max(LIMITS.prepareCommand).optional(),
+  budget: SwarmBudgetInput.optional(),
+}).strict()
+/** Validate a new swarm's brief, naming each bad field in the 400 the panel shows. */
+function parseSwarmBrief(body: unknown): SwarmBriefInput {
+  const parsed = SwarmBrief.safeParse(body)
+  if (parsed.success) return parsed.data
+  throw new RouteError(400, parsed.error.issues.map(issue => `${issue.path.join('.') || 'body'}: ${issue.message}`).join('; '))
+}
+/** The local Source's configured repository, which pre-fills the launcher's workspace; empty when it is not an absolute path. */
+function defaultWorkspace(runtime: HttpHost): string {
+  const repository = runtime.store.settings().sources.local?.config.repository
+  return typeof repository === 'string' && isAbsolute(repository.trim()) ? repository.trim() : ''
+}
+/** Run a SwarmManager operation, turning its validation and lifecycle refusals into 400s with their message. */
+async function swarmCall<T>(work: () => Promise<T>): Promise<T> {
+  try { return await work() } catch (error) {
+    if (error instanceof RouteError) throw error
+    throw new RouteError(400, error instanceof Error ? error.message : String(error))
+  }
+}
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
@@ -160,6 +200,17 @@ function routes(runtime: HttpHost): Routes {
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
     'GET state': () => stateView(runtime),
+    'GET swarms': () => ({ items: store.swarms.list(), defaultWorkspace: defaultWorkspace(runtime), legacyMasterId: runtime.masterId }),
+    'POST swarms': async ({ body }) => {
+      const input = parseSwarmBrief(await body())
+      const swarm = await swarmCall(() => runtime.swarms.create(input))
+      return { swarm, masterId: swarm.masterSessionId }
+    },
+    'POST swarms/:id/open': async ({ params }) => {
+      const swarm = await swarmCall(() => runtime.swarms.open(params.id))
+      return { swarm, masterId: swarm.masterSessionId }
+    },
+    'POST swarms/:id/finish': async ({ params }) => ({ swarm: await swarmCall(() => runtime.swarms.finish(params.id)) }),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),

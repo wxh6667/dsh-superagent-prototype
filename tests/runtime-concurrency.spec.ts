@@ -1,9 +1,9 @@
 /** Concurrent runtime behavior across overlapping triggers, deliveries, and worker launches. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
+import { latestAssignment, waitsForPerson, type Swarm, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Later } from '../src/app/effects.ts'
 import { reportRelay } from '../src/app/notices.ts'
-import { WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
+import { DshExecutor, WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { deferred, waitUntil } from './fixtures/async.ts'
@@ -888,6 +888,39 @@ describe('the Executor\'s parts', () => {
     expect(slots.used()).toBe(2)
     slots.reserve('t4', 'launch')
     expect(slots.used()).toBe(3)
+  })
+  it('keeps a launch queued with Later while its swarm already runs maxWorkers', async () => {
+    const swarm: Swarm = { id: 's1', title: 'S', mission: 'M', workspace: '/tmp', verify: '', prepare: '',
+      budget: { maxTasks: 10, maxWorkers: 1, maxRounds: 2 }, status: 'active', masterSessionId: 'orchestrator-s1',
+      createdAt: '2026-10-01T00:00:00.000Z' }
+    const owned = (id: string, state: 'running' | 'pending'): Ticket => ({ id, swarmId: swarm.id, title: id,
+      assignments: [{ id: `${id}-a`, state }], inputs: [], undelivered: [], origin: { triggerId: '', triggerIds: [] } } as unknown as Ticket)
+    const running = owned('one', 'running'), queued = owned('two', 'pending')
+    let launch!: (payload: { ticketId: string; assignmentId: string }) => Promise<void>
+    const ensure = vi.fn()
+    const host = {
+      context: { on: vi.fn(), agents: { get: (id: string) => id === 'worker-one' ? { status: 'running' } : undefined } },
+      engine: { assignmentStarted: vi.fn() },
+      store: {
+        tickets: { get: (id: string) => [running, queued].find(ticket => ticket.id === id), open: () => [running, queued],
+          list: () => [running, queued], save: vi.fn() },
+        triggers: { get: () => undefined }, settings: () => ({ executor: { maxWorkers: 3 } }),
+      },
+      effects: { handle: vi.fn((kind: string, handler: typeof launch) => { if (kind === 'launch') launch = handler }) },
+      health: { get: () => undefined, set: vi.fn() },
+      machine: { stateDir: '/tmp' },
+      lifetime: new AbortController().signal,
+      sessions: { ensure, prompt: vi.fn(), holds: vi.fn(async () => false), relay: vi.fn(), promptedId: (id: string) => id },
+      closing: () => false,
+      paused: () => false,
+      environment: () => [],
+      sourceLink: vi.fn(async () => ({})),
+      repliedTo: () => undefined,
+      swarmOf: (ticket: Ticket) => ticket.swarmId === swarm.id ? swarm : undefined,
+    }
+    new DshExecutor(host as never)
+    await expect(launch({ ticketId: 'two', assignmentId: 'two-a' })).rejects.toBeInstanceOf(Later)
+    expect(ensure).not.toHaveBeenCalled()
   })
   it('wakes a worker for a person\'s message in the one slot beyond the limit, and ahead of launches once a slot frees up', () => {
     const running = ['t1', 't2', 't3']

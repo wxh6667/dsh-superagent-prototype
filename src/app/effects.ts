@@ -15,10 +15,10 @@ export interface EffectPayloads {
   launch: { ticketId: string; assignmentId: string }
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
   delivery: { ticketId: string }
-  /** Steer a report or a candidate into the main Session; the key is the request ID. */
-  relay: { text: string }
-  /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */
-  notice: { value: Record<string, unknown>; summary: string }
+  /** Steer a report or a candidate into the main Session; the key is the request ID. `swarmId` names the owning swarm's master, absent for the legacy master. */
+  relay: { text: string; swarmId?: string }
+  /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. `swarmId` names the owning swarm's master, absent for the legacy master. */
+  notice: { value: Record<string, unknown>; summary: string; swarmId?: string }
   /** Send a message for a Channel through its Source; the key is the message ID, whose receipt the Outbox keeps. */
   reply: Record<string, never>
 }

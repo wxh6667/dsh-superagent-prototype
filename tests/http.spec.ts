@@ -1,6 +1,7 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { registerHttp } from '../src/app/http.ts'
+import type { Swarm } from '../src/core/index.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
@@ -110,4 +111,54 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+const swarmRecord = (id: string, status: Swarm['status'] = 'active'): Swarm => ({
+  id, title: `Swarm ${id}`, mission: `Mission ${id}`, workspace: '/srv/repo', verify: 'scripts/verify.sh', prepare: '',
+  budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 }, status, masterSessionId: `orchestrator-${id}`,
+  createdAt: '2026-11-06T00:00:00Z', ...status === 'completed' ? { completedAt: '2026-11-06T01:00:00Z' } : {},
+})
+
+it('lists swarms with the launcher defaults and creates, opens and finishes one', async () => {
+  const active = swarmRecord('s1'), legacy = { ...swarmRecord('legacy', 'completed'), masterSessionId: '', legacy: true as const }
+  const created = { ...active, title: 'Ship', mission: 'Do it' }
+  const completed = { ...active, status: 'completed' as const, completedAt: '2026-11-06T01:00:00Z' }
+  const create = vi.fn(async () => created), open = vi.fn(async () => active), finish = vi.fn(async () => completed)
+  const call = serve({
+    masterId: 'legacy-master',
+    store: { swarms: { list: () => [active, legacy] },
+      settings: () => SettingsSchema.parse({ sources: { local: { enabled: true, config: { repository: '/srv/repo' } } } }) },
+    swarms: { create, open, finish },
+  })
+  expect(await call('GET', 'swarms')).toEqual({ status: 200,
+    body: { items: [active, legacy], defaultWorkspace: '/srv/repo', legacyMasterId: 'legacy-master' } })
+  const brief = { title: ' Ship ', mission: ' Do it ', acceptance: ' Works ', scope: ' repo ', workspace: '/srv/repo',
+    verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } }
+  expect(await call('POST', 'swarms', brief)).toEqual({ status: 200, body: { swarm: created, masterId: 'orchestrator-s1' } })
+  expect(create).toHaveBeenCalledWith({ title: 'Ship', mission: 'Do it', acceptance: 'Works', scope: 'repo', workspace: '/srv/repo',
+    verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } })
+  expect(await call('POST', 'swarms/s1/open')).toEqual({ status: 200, body: { swarm: active, masterId: 'orchestrator-s1' } })
+  expect(open).toHaveBeenCalledWith('s1')
+  expect(await call('POST', 'swarms/s1/finish')).toEqual({ status: 200, body: { swarm: completed } })
+  expect(finish).toHaveBeenCalledWith('s1')
+})
+
+it('refuses an invalid swarm brief and reports manager refusals as 400 with their message', async () => {
+  const call = serve({
+    masterId: 'm',
+    store: { swarms: { list: () => [] }, settings: () => SettingsSchema.parse({}) },
+    swarms: { create: async () => { throw new Error('Not a Trellis workspace') },
+      open: async () => { throw new Error('Unknown swarm s1') },
+      finish: async () => { throw new Error('Swarm s1 still has 2 open tickets') } },
+  })
+  expect((await call('POST', 'swarms', { title: ' ', mission: ' ', workspace: 'relative' })).body.error).toContain('title')
+  expect((await call('POST', 'swarms', { title: 't', mission: 'm', workspace: 'relative' })).body.error).toContain('absolute workspace')
+  expect((await call('POST', 'swarms', { title: 't', mission: 'm', workspace: '/r',
+    budget: { maxTasks: 0 } })).body.error).toContain('maxTasks')
+  expect(await call('POST', 'swarms', { title: 't', mission: 'm', workspace: '/r' }))
+    .toEqual({ status: 400, body: { error: 'Not a Trellis workspace' } })
+  expect(await call('POST', 'swarms/s1/open')).toEqual({ status: 400, body: { error: 'Unknown swarm s1' } })
+  expect(await call('POST', 'swarms/s1/finish')).toEqual({ status: 400,
+    body: { error: 'Swarm s1 still has 2 open tickets' } })
+  expect(await call('GET', 'swarms')).toEqual({ status: 200, body: { items: [], defaultWorkspace: '', legacyMasterId: 'm' } })
 })

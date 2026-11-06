@@ -7,6 +7,7 @@ import { SettingsSchema } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
+import { localKind } from '../src/sources/local.ts'
 import { snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/views/records.ts'
 import { basisFacts, ticketDetail } from '../src/app/views/tickets.ts'
 import { threadDetail } from '../src/app/views/threads.ts'
@@ -52,9 +53,10 @@ it('names the Thread of each dropped message: the one of the Trigger its Channel
 function views() {
   store.saveSettings(SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }] },
     github: { allowed: [{ id: 'alice' }] } },
-    rules: [{ id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Fix copy' }] } }))
+    rules: [{ id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Fix copy' }] },
+  sources: { local: { enabled: true, config: {} } } }))
   const sources = new SourceRegistry(() => store.settings())
-  sources.register(feishuKind); sources.register(githubKind)
+  sources.register(feishuKind); sources.register(githubKind); sources.register(localKind)
   return { store, sources, links }
 }
 const at = new Date().toISOString()
@@ -98,18 +100,21 @@ it('classifies a Thread by what it is doing, and offers a filtered Trigger of a 
   expect(rows[0]!.actor.name).toEqual({ zh: 'Alice', en: 'Alice' })
 })
 
-it('states each Source by the first state that holds', () => {
+it('states the Local Source by the first state that holds', () => {
   const host = views()
   const states = (setup: Parameters<typeof sourcesStatus>[2], health: Parameters<typeof sourcesStatus>[1] = {}) =>
     Object.fromEntries(sourcesStatus(host, health, setup).map(source => [source.id, source.state]))
-  expect(states({})).toEqual({ feishu: 'starting', github: 'starting' })
-  expect(states({}, { feishu: { state: 'ready', detail: '' }, history: { state: 'paused', detail: '' }, github: { state: 'error',
+  expect(states({})).toEqual({ local: 'starting' })
+  expect(states({}, { local: { state: 'ready', detail: '' }, history: { state: 'paused', detail: '' }, github: { state: 'error',
     detail: 'x' } }))
-    .toEqual({ feishu: 'paused', github: 'error' })
+    .toEqual({ local: 'ready' })
+  expect(states({}, { local: { state: 'paused', detail: '' } })).toEqual({ local: 'paused' })
+  expect(states({}, { local: { state: 'error', detail: 'x' } })).toEqual({ local: 'error' })
   const problem = { place: 'deployment', code: 'stateDirUnset', values: {}, detail: '' } as never
-  expect(states({ problem }, { feishu: { state: 'ready', detail: '' }, history: { state: 'ready', detail: '' }, github: { state: 'ready',
-    detail: '' } }))
-    .toEqual({ feishu: 'setup', github: 'setup' })
+  expect(states({ problem }, { local: { state: 'ready', detail: '' }, history: { state: 'ready', detail: '' } }))
+    .toEqual({ local: 'setup' })
+  const localProblem = { place: 'local', code: 'localRepositoryMissing', values: {}, detail: '' } as never
+  expect(states({ problem: localProblem }, { local: { state: 'ready', detail: '' } })).toEqual({ local: 'error' })
 })
 
 it('follows the Ticket\'s stage: a blocked Ticket a person answered since is working, with no retry, note or turn end', () => {
@@ -175,15 +180,15 @@ it('lists an Eval past its deadline, and as dsh-superagent\'s own errors only pa
   expect(found.filter(item => item.kind === 'source-error').map(item => item.source.health.name)).toEqual(['feishu', 'history'])
 })
 
-it('says no Source runs when every Source is off, and states a Source missing or off', () => {
+it('says no Source runs when the Local Source is off, and shows only the Local Source on the status', () => {
   const host = views()
   expect(problems(host).map(item => item.kind)).not.toContain('no-source')
   const settings = store.settings()
   store.saveSettings({ ...settings, sources: { feishu: { enabled: false, config: {} }, github: { enabled: false, config: {} },
-    jira: { enabled: true, config: { site: 'acme' } } } })
+    local: { enabled: false, config: {} }, jira: { enabled: true, config: { site: 'acme' } } } })
   expect(problems(host).map(item => item.kind)).toContain('no-source')
   expect(Object.fromEntries(sourcesStatus(host, {}, {}).map(source => [source.id, [source.state, source.installed]])))
-    .toEqual({ feishu: ['off', true], github: ['off', true], jira: ['missing', false] })
+    .toEqual({ local: ['off', true] })
 })
 
 it('sends text without HTML, entity-encoded tags included, and with images named', () => {

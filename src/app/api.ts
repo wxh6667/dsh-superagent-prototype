@@ -1,5 +1,6 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
+import type { Swarm, SwarmBudget } from '../core/index.ts'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
@@ -17,8 +18,25 @@ interface Paged { offset?: number; limit?: number }
 /** Whether a context update was already injected into the main Session or is still pending delivery. */
 type Delivery = 'injected' | 'pending'
 
+/** The brief a person supplies when starting a swarm; the host validates it before creating anything. */
+export interface SwarmBriefInput {
+  title: string
+  mission: string
+  acceptance?: string
+  scope?: string
+  /** Absolute local path of the Trellis workspace the swarm is bound to. */
+  workspace: string
+  verify?: string
+  prepare?: string
+  budget?: Partial<SwarmBudget>
+}
+
 export interface Api {
   'GET state': { response: StateView }
+  'GET swarms': { response: { items: Swarm[]; defaultWorkspace: string; legacyMasterId: string } }
+  'POST swarms': { body: SwarmBriefInput; response: { swarm: Swarm; masterId: string } }
+  'POST swarms/:id/open': { response: { swarm: Swarm; masterId: string } }
+  'POST swarms/:id/finish': { response: { swarm: Swarm } }
   'GET overview': { response: OverviewView }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }

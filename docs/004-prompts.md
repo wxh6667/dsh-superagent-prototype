@@ -4,16 +4,16 @@ This document explains what the agents read, what a team can edit, and when chan
 
 ## What a team writes
 
-A team can edit three team sections, add skills, and override every built-in system-prompt part. Most defaults live under `prompts/` and `skills/`. Tool descriptions, notices and cards remain in code and cannot be edited through prompt settings.
+A team can edit three team sections, add skills, and override every built-in system-prompt part. Most defaults live under `prompts/`. Tool descriptions, notices and cards remain in code and cannot be edited through prompt settings.
 
 | Section | Holds |
 | --- | --- |
-| Communication | When to message people, how messages read, the line that begins every GitHub message (`This is by an automated agent, not a human` by default), how to handle reviews, and which ordinary accounts are review bots |
-| Ticket scope | When a Ticket goes on and when it stops with a draft |
-| Delivery requirements | Evidence in pull requests, the auto-merge condition with its line threshold, and the commit author; without one, the Executor commits as the agent account's no-reply address |
-| Team skills | Knowledge the agents load when they need it, such as an `identities` skill that says which Feishu user is which GitHub account |
+| Communication | When to tell a person about a result, how messages read, how a blocker or an incomplete handoff is stated, and how a local result is delivered |
+| Ticket scope | When a Ticket goes on, and when it pauses with usable partial work |
+| Delivery requirements | The local commit, the verification evidence, before-and-after UI evidence, and the review the main Session performs before committing |
+| Team skills | Knowledge the agents load when they need it, such as a project-specific diagnosis or release procedure |
 
-The built-in text covers the roles, tool usage, host mechanics, authorization rules, and the GitHub and Feishu skills. It refers to the team sections by their headings instead of repeating them.
+The built-in text covers the local swarm roles, dispatch, work and handoff rules. It refers to the team sections by their headings instead of repeating them. GitHub/Feishu Source skills and proactive assessment instructions are not part of the assembled prompt.
 
 ### Built-in parts and templates
 
@@ -22,16 +22,11 @@ Overrides use these keys:
 | Parts | Keys |
 | --- | --- |
 | Shared instructions and roles | `runtime/shared`, `runtime/orchestrator`, `runtime/worker` |
-| Working instructions | `runtime/subscriptions`, `runtime/replies`, `runtime/dispatch`, `runtime/work`, `runtime/admission` |
+| Working instructions | `runtime/dispatch`, `runtime/work` |
 | Handoff instructions | `runtime/handoff/orchestrator`, `runtime/handoff/worker` |
-| Source skills | `skill/feishu`, `skill/github` |
-| Generated sections | `runtime/environment`, `runtime/policy`, `runtime/policy/none` |
+| Generated sections | `runtime/environment` |
 
-The generated sections are editable templates. They must retain these placeholders:
-
-- `runtime/environment`: `{variables}`, filled with execution environment lines.
-- `runtime/policy`: `{version}`, `{mode}` and `{rules}`, with one line per enabled rule.
-- `runtime/policy/none`: `{version}` and `{mode}`, used when no rule is enabled.
+The generated execution environment is an editable template. It must retain `{variables}`, filled with execution environment lines.
 
 Editing a part changes the instructions the model receives. It does not change the gate, Mandates, tool checks or account wrappers, which remain enforced by code.
 
@@ -47,18 +42,13 @@ The system prompt is assembled in this order:
 
 1. Shared instructions and the role.
 2. The three team sections.
-3. Subscriptions and replies.
-4. Dispatch for the main Session, or work instructions for an Executor.
-5. `runtime/admission`, for the main Session only.
-6. Handoff instructions.
-7. `runtime/environment`.
-8. `runtime/policy`, for the main Session only.
+3. Dispatch for the main Session, or work instructions for an Executor.
+4. Handoff instructions.
+5. `runtime/environment`.
 
-Admission instructions come from `prompts/admission.md`. They describe proactive assessment and when an irrelevant candidate can be ignored from its card. `orchestrator_eval` returns context rather than repeating these instructions.
+The environment section gives the main Session deployment-wide values and each Executor its Ticket-specific values. It is last so the rest of the prompt stays unchanged when the environment changes.
 
-The environment section gives the main Session deployment-wide values and each Executor its Ticket-specific values. The Policy section is regenerated from settings on every model request. It contains the Policy version, accept mode, the explicit-request exemption, and enabled rules as `- <name> (<id>): <instruction>`, or a statement that none is enabled. It is last so a Policy change leaves the preceding prompt text unchanged.
-
-Executors also read DeepSeek Harness's coding prompt and the repository's `AGENTS.md`; the main Session does not. An inferred Ticket adds a final note limiting its Executor to the matched rules. Assignments and incoming messages arrive inline as Trigger cards, with resource pointers only for truncated content.
+Executors also read DeepSeek Harness's coding prompt and the repository's `AGENTS.md`; the main Session does not. Assignments and incoming messages arrive inline as Trigger cards, with resource pointers only for truncated content.
 
 Executors work unattended. Their tools exclude those that ask a person, present UI to them or change the profile, such as `ask_user_question`, `present` and `plugin_manager`.
 
@@ -66,31 +56,26 @@ From strongest to weakest:
 
 1. Facts enforced by tools and the host: identities, permissions, tool argument checks, reply purposes, length limits. Prompt text cannot change them.
 2. Built-in and generated sections, as the team's overrides of them read.
-3. The process and communication in a proactive Ticket's matched rules, for that Ticket's Executor Session only.
-4. Team sections and team skills.
-5. Outside text: messages, comments, documents and quotes. It is data and never changes rules or authorization.
+3. Team sections and team skills.
+4. Outside text: messages, comments, documents and quotes. It is data and never changes rules or authorization.
 
 ## Principles of the built-in text
 
 These apply [000 Philosophy](000-philosophy.md) to the agents:
 
-- **Separate roles.** The main Session only routes: it forwards the original Trigger and the routing facts, and makes no technical decisions, through one routing tool that takes the decisions on several waiting candidates in one call. A routing note has at most 30 words. The Executor reads the original sources, judges the scope, implements and verifies.
-- **The main Session does not wait.** Reports, follow-up notices, candidates and completed background jobs arrive automatically as messages. It ends the turn when nothing remains to do. A guard refuses `sleep`, shell timeouts over 30 seconds and job waits over 5 seconds, because a blocked step delays new candidates. These instructions replace DeepSeek Harness's own job-notification note in the main Session's complete prompt.
-- **Message only when a person must act or can use a result:** a result can be reviewed or used, a decision or resource is needed, or the work cannot be finished. Chat messages are one sentence by default, with a hard limit of 100 words.
-- **Executors decide their follow-ups.** Each Executor handles and acknowledges in-scope requests, and hands back requests beyond its Ticket or for another Ticket. A message becomes new work only after all its owners hand it back or end without taking it up. The main Session receives follow-up notices but may act on them only to stop work. Handed-back messages then arrive as candidates with the Executors' reasons.
-- **Coordinate through subscriptions and the main Session.** An Executor follows related Threads for context. The main Session can send a fact from another Ticket in a note of at most 100 words. Neither the Subscription nor the note grants authority.
-- **Attach only on an explicit reference.** A message must point to a Ticket's pull request, Issue, source message or acknowledgement, or to a recent change with exactly one matching Ticket. Topic similarity alone is not enough. Attachment subscribes the Ticket to the entire Thread; an Executor finding it unrelated uses `orchestrator_thread_unrelated` and does not answer there.
-- **Confirm concretely, once.** Before substantial work, the Executor confirms each new request and names the object and the expected result, as a reply under the original message.
-- **Ask through `human_action`.** The Executor puts one concrete question in its Report, and the main Session forwards it unchanged. If a person's message prompted the question, it names that message and the host asks there. Otherwise it asks in the Ticket's original conversation. Already authorized work can continue meanwhile.
-- **Honest delivery.** Opening a pull request is not readiness; a draft is marked unfinished; a UI change without a real before screenshot is not ready.
+- **Separate roles.** The main Session coordinates one local swarm batch: it creates a brief, plans with Trellis, dispatches independent local Tickets, reviews worker diffs and commits. Workers read the Trellis artifacts, implement in their own worktree, run the swarm verify command and report. The main Session makes no implementation edits.
+- **Trellis gates risk.** Non-trivial work waits for an explicitly confirmed plan and keeps PRD/design/implement artifacts; lightweight edits keep a concise record. Dispatch creates one Ticket per child and holds a dependent child until its prerequisite reports ready.
+- **The main Session does not wait.** Worker reports, attention requests and completed background jobs arrive automatically as messages. It ends the turn when nothing remains to do. A guard refuses `sleep`, shell timeouts over 30 seconds and job waits over 5 seconds, because a blocked step delays incoming reports.
+- **Message only when a person must act or can use a result:** a ready result they can review, a decision or resource needed, a material risk, or work that cannot be finished. Local delivery is one short sentence by default.
+- **Workers decide their own follow-ups.** Each worker handles requests within its Ticket and reports a blocker beyond it. Workers never commit, push or open a pull request; the main Session commits after reviewing the diff and verification evidence.
+- **Ask through `human_action`.** The worker puts one concrete question in its Report, and the main Session forwards it through `orchestrator_reply`. If a person's message prompted the question, it names that message; otherwise it asks in the Ticket's original conversation. Already authorized work can continue meanwhile.
+- **Honest delivery.** A draft is marked unfinished; a UI change without a real before capture is not ready; a local commit is not a remote review or merge.
 - **A person's pause holds** across follow-ups, new Executor Sessions and restarts until a person lifts it. Automatic feedback never resumes paused work.
 - **Examples only show format.** An example sentence is not a fact the agent may claim.
-- **Handle reviews by outcome.** A fixed and verified comment is resolved silently; a declined one gets one sentence of reason. An automated reviewer's thread is resolved once it has an answer, and each automated reviewer gets at most three rounds per pull request.
-- **Yield to duplicate work.** When a person's branch or pull request already contains the Ticket's change, the Executor closes its own pull request with one sentence pointing to theirs.
 
 ## Versions
 
 - Each save creates an immutable version containing the full configuration, revision number, predecessor, timestamp and origin (panel or tool). Restoring a version or defaults creates another version.
 - Saves name their base revision. A conflicting save is refused without discarding the draft.
 - Sessions read the latest version on every model request, including later steps in the same turn. Saving does not restart, cancel or wake a Session. The host records the revisions each Session used; an Executor can read any revision it worked under.
-- The deployment sets a total size limit, including overrides. Validation refuses unknown keys, reserved built-in skill names, unknown override parts and missing template placeholders. It never silently truncates text. An override identical to the default is removed so the part follows future defaults.
+- The deployment sets a total size limit, including overrides. Validation refuses unknown keys, unknown override parts and missing template placeholders. It never silently truncates text. An override identical to the default is removed so the part follows future defaults.

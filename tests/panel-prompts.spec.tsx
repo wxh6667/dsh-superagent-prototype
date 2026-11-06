@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 // The Prompts settings.
-import { act } from 'react'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
 import { expect, it } from 'vitest'
 import { zh } from '../src/client/locales.ts'
@@ -42,15 +41,13 @@ it('keeps a conflicting prompt draft, rebases it onto the newer version and save
   expect(server.prompts.current.config).toMatchObject({ communication: 'Mine', scope: 'Theirs' })
 })
 
-it('shows a built-in skill with the CLI notes in the full prompt, editable as a built-in part, and adds a team skill but no skill under a built-in name', async () => {
+it('offers no built-in skill, and adds a team skill but no skill under an invalid name', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
   await click(tab(zh.promptViewFull))
-  await act(async () => { const select = field<HTMLSelectElement>(zh.promptPreviewTarget); select.value = 'skill/github'; select.dispatchEvent(new Event('change', { bubbles: true })) }); await settle()
-  expect(text()).toContain('## CLI usage')
-  expect(all('.dt-preview-part[data-editable] b').map(name => name.textContent)).toEqual([zh['promptPart.skill/github']])
+  expect([...field<HTMLSelectElement>(zh.promptPreviewTarget).options].map(option => option.value)).toEqual(['orchestrator', 'worker'])
   await click(tab(zh.promptViewEdit))
-  for (const name of ['Bad Name', 'github']) {
+  for (const name of ['Bad Name', 'bad name']) {
     await type(field<HTMLInputElement>(zh.promptAddSkill), name)
     await click(zh.promptAddSkillAction)
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(zh.promptSkillNameInvalid)
@@ -136,9 +133,9 @@ it('edits a built-in part as an override of its built-in text, marks it changed,
 it('says which placeholders a template keeps', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
-  await click(builtInItem(zh['promptPart.runtime/policy']))
-  expect(text()).toContain('这是模板：保留占位符 {version}、{mode}、{rules}，由系统填入内容。')
-  expect(text()).toContain(zh['promptReadBy.orchestrator'])
+  await click(builtInItem(zh['promptPart.runtime/environment']))
+  expect(text()).toContain('这是模板：保留占位符 {variables}，由系统填入内容。')
+  expect(text()).toContain(zh['promptReadBy.both'])
 })
 
 it('marks an override whose built-in text an upgrade changed, shows how it changed, and keeps the team\'s text or takes the new one', async () => {
@@ -210,10 +207,9 @@ it('shows a draft\'s template of a generated part filled, and names a part by it
   const environment = all('.dt-preview-part').find(part => part.querySelector('b')?.textContent === zh['promptPart.runtime/environment'])!
   expect(environment.querySelector('pre')?.textContent).toBe('Where you work:\n')
   await click(tab(zh.promptViewEdit))
-  await click(builtInItem(zh['promptPart.runtime/policy']))
-  await type(field<HTMLTextAreaElement>(zh.promptBody), '## Policy\n{version} {mode}')
+  await type(field<HTMLTextAreaElement>(zh.promptBody), 'Where you work.')
   await click(zh.save)
-  expect(text()).toContain(`「${zh['promptPart.runtime/policy']}」的模板必须保留占位符 {rules}`)
+  expect(text()).toContain(`「${zh['promptPart.runtime/environment']}」的模板必须保留占位符 {variables}`)
 })
 
 it('lists the overrides of parts this version no longer has, which the next save drops', async () => {

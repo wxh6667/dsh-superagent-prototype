@@ -277,6 +277,8 @@ export interface Attention { id: string; question: string; triggerId?: string }
 export interface Ticket {
   id: string
   title: string
+  /** The Swarm that owns this ticket; absent on tickets persisted before schema 12, which migration assigns to the legacy swarm. */
+  swarmId?: string
   decisionId: string
   mandate: Mandate
   /** The Channels of the messages it was accepted from, which its replies go to. */

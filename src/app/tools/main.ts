@@ -1,14 +1,14 @@
-/** Main Session tools for routing triggers, assessing candidates, sending replies, and updating settings and prompts. */
+/** Main Session tools for ticket operations, replies, local Trellis planning and dispatch, and updating settings and prompts. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { basename, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople, type ReceiveResult, type Trigger }
+import { key, reasonText, type DecisionKind, type EngineForMainSession, type EngineForPeople, type ReceiveResult, type Swarm, type Trigger }
   from '../../core/index.ts'
 import type { LocalRepo } from '../../deployment.ts'
-import type { Trellis } from '../../infra/trellis.ts'
+import { Trellis } from '../../infra/trellis.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
-import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
+import { WorktreeNameSchema } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
@@ -27,11 +27,12 @@ export interface MainToolsHost {
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
-  readonly assessor: Pick<MasterAssessor, 'context' | 'read' | 'decide'>
   readonly resources: ResourceHost
   /** The configured local deployment, or undefined when the local Source is off or setup is pending. */
   readonly local: () => LocalRepo | undefined
   readonly trellis: Pick<Trellis, 'plan' | 'archive'>
+  /** The Trellis the calling swarm plans and archives against; without it, one bound to the swarm's own workspace is built. */
+  readonly trellisFor?: (swarm: Swarm) => Pick<Trellis, 'plan' | 'archive'>
   readonly masterId: string
   /** Stores a local Trigger through the Engine; the dispatch tool is its Source. */
   readonly receive: (trigger: Trigger) => ReceiveResult
@@ -48,7 +49,6 @@ function routed(host: MainToolsHost, result: { decision?: DecisionKind; reason: 
   return { ...(result.decision ? { decision: result.decision } : {}), reason: result.reason,
     ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
 }
-const fromDecision = (decision: Decision) => ({ decision: decision.kind, reason: reasonText(decision.reason), ticketId: decision.ticketId })
 /** One task in a confirmed local plan; the adapter writes the artifacts into the created Trellis directory. */
 const TrellisTaskPlanSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -74,131 +74,22 @@ function localWorktreeName(taskDir: string): string {
   const words = base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').split('-').filter(Boolean).slice(0, 4).join('-').slice(0, 32)
   return WorktreeNameSchema.parse(/^[a-z]/.test(words) ? words : `task-${words || 'local'}`.slice(0, 32))
 }
-/** Resolve a task directory and keep it under the local repository's `.trellis/tasks`. */
-function localTaskDir(local: LocalRepo, taskDir: string): string {
-  const tasks = resolve(local.repository, '.trellis', 'tasks')
+/** Resolve a task directory and keep it under the workspace's `.trellis/tasks`. */
+function localTaskDir(workspace: string, taskDir: string): string {
+  const tasks = resolve(workspace, '.trellis', 'tasks')
   const target = resolve(taskDir)
   if (!target.startsWith(tasks + sep)) throw new Error(`Not a Trellis task under ${tasks}: ${taskDir}`)
   return target
 }
-/**
- * One routing decision of `orchestrator_route`. The schema holds only its shape: each kind's fields are checked as its item
- * runs (`FIELDS`), so an item that lacks one, or whose value breaks a limit, is refused alone.
- */
-const RouteItemSchema = z.object({
-  kind: z.enum(['accept', 'attach', 'ignore', 'stop']),
-  trigger_id: z.string().describe('The candidate card\'s trigger_id; deciding it decides its batch.'),
-  ticket_id: z.string().nullish().describe('attach and stop: the ticket.'),
-  title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
-  worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ''}`),
-  acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
-  note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
-  reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
-}).strict()
-type RouteItem = z.infer<typeof RouteItemSchema>
-type Kind = RouteItem['kind']
-type Field = Exclude<keyof RouteItem, 'kind' | 'trigger_id'>
-/** Each field's check, the kinds whose items read it and those that need it; an item of another kind leaves it unread. */
-const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: readonly Kind[] }> = {
-  ticket_id: { check: z.string(), reads: ['attach', 'stop'], needs: ['attach', 'stop'] },
-  title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
-  worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
-  acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
-  note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
-  reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
-}
-/** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
-function invalid(item: RouteItem): string | undefined {
-  for (const [field, { check, reads, needs }] of Object.entries(FIELDS) as [Field, typeof FIELDS[Field]][]) {
-    const value = item[field]
-    if (!reads.includes(item.kind)) continue
-    if (value === undefined || value === null || value.trim() === '') {
-      if (needs.includes(item.kind)) return `${item.kind} needs ${field}`
-      continue
-    }
-    const checked = check.safeParse(value)
-    if (!checked.success) return `${field}: ${checked.error.issues[0]?.message ?? 'invalid'}`
-  }
-  return undefined
-}
-type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | undefined; triggerIds?: readonly string[] }
-/**
- * Carry out one routing decision as its Engine command, in a transaction of its own. `decided` holds the Triggers that this
- * call's earlier items decided, with their batches.
- */
-function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string, string>): Routed | { refused: string } {
-  const note = item.note ? { note: item.note } : {}
-  // A Trigger an earlier item decided went with that item's Decision, also as a member of its batch.
-  // A stop of it for another ticket is the Engine's to judge.
-  const earlier = decided.get(item.trigger_id)
-  if (earlier && item.kind === 'ignore') return { refused: `Decided in this call with ${earlier}, whose Decision took its batch` }
-  switch (item.kind) {
-    case 'accept': {
-      const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
-      const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!, reason: { code: 'explicitRouted' },
-        acknowledgement: item.acknowledgement!, name: item.worktree_name!, ...note })
-      // A Decision that created no ticket is the item's refusal; one that existed before keeps what it was accepted with.
-      if (decision.kind !== 'accept' || !decision.ticketId) return { refused: `Ticket was not created: ${reasonText(decision.reason)}` }
-      if (decision.id === before) {
-        return { decision: 'accept', reason: `Already accepted as ${decision.ticketId}; title and acknowledgement unchanged`, ticketId: decision.ticketId }
-      }
-      return { ...fromDecision(decision), triggerIds: decision.triggerIds }
-    }
-    case 'attach': {
-      const ticket = host.quietly(() => host.engine.attach(item.ticket_id!, item.trigger_id, item.note ?? undefined))
-      return { reason: 'Attached: the ticket follows the trigger\'s thread and receives the trigger', ticketId: ticket.id }
-    }
-    // Through `engine.decide`, so only a person's message the gate admits with explicit strength stops a ticket.
-    case 'stop': {
-      const decision = host.engine.decide(item.trigger_id, { kind: 'stop', ticketId: item.ticket_id!, reason: item.reason || { code: 'humanStop' } })
-      return { ...fromDecision(decision), triggerIds: decision.triggerIds }
-    }
-    case 'ignore': {
-      const decision = host.engine.decide(item.trigger_id, { kind: 'ignore', reason: item.reason! })
-      return { ...fromDecision(decision), triggerIds: decision.triggerIds }
-    }
-  }
-}
-/**
- * `orchestrator_route`: routing decisions for several triggers in one call, in order. Each runs as its own Engine command; one
- * that is refused, or fails, is answered so, and the others still run.
- */
-function routeTool(host: MainToolsHost): Tool {
-  return tool({
-    name: 'orchestrator_route',
-    description: 'Route candidates, one item each by the card\'s trigger_id, in one call: accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, or ignore a candidate that needs no ticket or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
-    schema: z.object({ decisions: z.array(RouteItemSchema).min(1).max(20) }).strict(),
-    execute: async ({ decisions }) => {
-      const decided = new Map<string, string>()
-      const results = decisions.map(item => {
-        const head = { trigger_id: item.trigger_id, kind: item.kind }
-        const problem = invalid(item)
-        if (problem) return { ...head, refused: problem }
-        try {
-          const result = route(host, item, decided)
-          if ('refused' in result) return { ...head, ...result }
-          for (const id of result.triggerIds ?? []) if (!decided.has(id)) decided.set(id, item.trigger_id)
-          const ticket = result.ticketId ? host.store.tickets.get(result.ticketId) : undefined
-          return { ...head, ...(result.decision ? { decision: result.decision } : {}), reason: result.reason,
-            ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
-        } catch (error) {
-          if (error instanceof UserError) return { ...head, refused: error.message }
-          host.context.logger.warn('dsh-superagent could not route trigger %s: %s', item.trigger_id, String(error))
-          return { ...head, refused: `Not recorded: ${error instanceof Error ? error.message : String(error)}; retry this item` }
-        }
-      })
-      host.requestPass()
-      return { results }
-    },
-  })
-}
-/** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
-export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
+/** The calling swarm's Trellis: the host seam, or one bound to the swarm's own workspace. */
+const trellisOf = (host: MainToolsHost, swarm: Swarm): Pick<Trellis, 'plan' | 'archive'> =>
+  host.trellisFor?.(swarm) ?? new Trellis({ repository: () => swarm.workspace, sessionId: swarm.masterSessionId })
+/** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session, and `swarm`, when present, is the calling master's swarm. */
+export function mainTools(host: MainToolsHost, agent: Agent, swarm?: Swarm): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
-    routeTool(host),
     tool({
       name: 'orchestrator_ticket_retry',
       description: 'Start a new assignment on an explicit human request to retry a ticket whose worker reported failed or blocked, or whose input was not delivered; the stalled one ends.',
@@ -227,41 +118,6 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       },
     }),
     tool({
-      name: 'orchestrator_trigger_requeue',
-      description: 'Queue a trigger for a fresh assessment, such as after its Source\'s access changed; a follow-up that reached a ticket comes back only from its worker.',
-      schema: z.object({ trigger_id: z.string() }).strict(),
-      execute: async args => {
-        // A follow-up that reached a ticket is its worker's to judge, which hands back what is not its own; a person may still requeue it.
-        const trigger = host.store.triggers.get(args.trigger_id)
-        const owners = trigger ? followupOwners(trigger, host.store) : []
-        if (owners.length) throw new UserError('workerDecides', { tickets: owners.join(', ') })
-        const queued = host.quietly(() => host.engine.reevaluate(args.trigger_id))
-        host.requestPass()
-        return { queued }
-      },
-    }),
-    tool({
-      name: 'orchestrator_eval',
-      description: 'Load a proactive candidate\'s window and its thread\'s tickets; repeated calls reuse them.',
-      schema: z.object({ trigger_id: z.string() }).strict(),
-      execute: async (args, signal) => host.assessor.context(args.trigger_id, signal),
-    }),
-    tool({
-      name: 'orchestrator_eval_read',
-      description: 'Read more of a candidate\'s context, always with its trigger_id: a message or stub whole by message_id, an image by image_id, the root, the parent, a thread page by cursor, or a file or directory by path.',
-      schema: EvalReadSchema,
-      execute: async (read, signal) => host.assessor.read(agent, read, signal),
-    }),
-    tool({
-      name: 'orchestrator_eval_decide',
-      description: 'Record the decision of an assessment, as admission describes it, after orchestrator_eval with the same trigger_id.',
-      schema: z.object({ trigger_id: z.string().min(1), ...AssessmentSchema.shape }).strict(),
-      execute: async ({ trigger_id, ...result }, signal) => {
-        const decided = await host.assessor.decide(trigger_id, AssessmentSchema.parse(result), signal)
-        return routed(host, { decision: decided.state as DecisionKind, reason: decided.reason, ticketId: decided.ticket_id })
-      },
-    }),
-    tool({
       name: 'orchestrator_reply',
       description: `Send an answer to a human question, a ready result, or attention requiring human action, as the replies section says; the gate refuses anything else, such as progress. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. IM limit: ${IM_WORDS} words.`,
       schema: z.object({
@@ -276,14 +132,6 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
           ...(args.ticket_id ? { ticketId: args.ticket_id } : {}), ...(args.human_action ? { question: args.human_action } : {}) })
         await host.sendReplies()
         return { status: host.store.replyStatus(reply.id) ?? reply.status }
-      },
-    }),
-    tool({
-      name: 'orchestrator_thread_unsubscribe',
-      description: 'Drop every ticket subscription on a thread. Later messages there no longer reach those tickets as context; a new positive decision can subscribe it again.',
-      schema: z.object({ thread: z.string().describe('Thread key, for example github:123 or feishu:<chat>:<root message>') }).strict(),
-      execute: async args => {
-        return { removed: host.quietly(() => host.engine.unsubscribe(args.thread)), thread: args.thread }
       },
     }),
     tool({
@@ -302,18 +150,6 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         const { context_delivery: _delivery, ...saved } = await host.settings.save(args.block === 'source' ? `source:${args.source!}` : args.block,
           args.value, args.revision, 'tool')
         return saved
-      },
-    }),
-    tool({
-      name: 'orchestrator_policy_sync',
-      description: 'Refresh one Source\'s part of the Policy from where that Source keeps it, such as the Feishu users of its sync chat. Same operation as the Web button.',
-      schema: z.object({ source: z.string() }).strict(),
-      execute: async args => {
-        const before = host.store.settings().policy.sources[args.source]?.allowed ?? []
-        const after = (await host.settings.sync(args.source)).allowed
-        const names = (from: typeof after, without: typeof after) => from.filter(item => !without.some(other => other.id === item.id))
-          .map(item => item.name ?? item.id)
-        return { source: args.source, allowed: after.length, added: names(after, before), removed: names(before, after) }
       },
     }),
     tool({
@@ -343,10 +179,10 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       description: 'Create the parent and child Trellis tasks for a confirmed local plan, write their PRD/Design/Implement artifacts, and start the parent as this Session\'s active task. It creates no Tickets. Call only after the user confirms the plan.',
       schema: TrellisPlanSchema,
       execute: async args => {
-        const local = host.local()
-        if (!local) throw new Error('The local Source is not configured; enable it and set its repository first')
-        const plan = await host.trellis.plan({ parent: args.parent, children: args.children })
-        return { ...plan, repository: local.repository }
+        const workspace = swarm?.workspace ?? host.local()?.repository
+        if (!workspace) throw new Error('The local Source is not configured; enable it and set its repository first')
+        const plan = await (swarm ? trellisOf(host, swarm) : host.trellis).plan({ parent: args.parent, children: args.children })
+        return { ...plan, repository: workspace }
       },
     }),
     tool({
@@ -356,16 +192,24 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       execute: async args => {
         const local = host.local()
         if (!local) throw new Error('The local Source is not configured; enable it and set its repository first')
+        const workspace = swarm?.workspace ?? local.repository
+        // A swarm's budget counts every Ticket it has owned, ended ones included, and refuses the whole batch before any is created.
+        if (swarm) {
+          const count = host.store.tickets.list().filter(ticket => ticket.swarmId === swarm.id).length
+          if (count + args.tasks.length > swarm.budget.maxTasks)
+            throw new Error(`Swarm ${swarm.id} allows at most ${swarm.budget.maxTasks} tasks; ${count} already exist and this batch of ${args.tasks.length} would exceed it`)
+        }
         const results: Record<string, unknown>[] = []
         for (const task of args.tasks) {
           try {
-            const taskDir = localTaskDir(local, task.task_dir)
-            const thread = `local:${host.masterId}:${basename(taskDir)}`
+            const taskDir = localTaskDir(workspace, task.task_dir)
+            const thread = `local:${swarm?.id ?? host.masterId}:${basename(taskDir)}`
             const trigger: Trigger = {
               id: key('trigger', 'local', taskDir, thread), source: 'local', threads: [{ source: 'local', id: thread }],
               actor: { source: 'local', id: local.actor }, human: true, addressed: 'direct', at: new Date().toISOString(),
               text: `${task.title}\n\nTrellis task: ${taskDir}\nRead the task's prd.md, design.md and implement.md before working.`,
-              channel: { source: 'local', thread, address: { thread } }, meta: { task_dir: taskDir, repository: local.repository },
+              channel: { source: 'local', thread, address: { thread } },
+              meta: { task_dir: taskDir, repository: workspace, ...(swarm ? { swarmId: swarm.id } : {}) },
             }
             const received = host.receive(trigger)
             if (received === 'filtered') {
@@ -390,10 +234,10 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       description: 'Archive a completed Trellis task after its commit. Trellis updates the task status and moves it to the archive.',
       schema: TrellisArchiveSchema,
       execute: async args => {
-        const local = host.local()
-        if (!local) throw new Error('The local Source is not configured; enable it and set its repository first')
-        const taskDir = localTaskDir(local, args.task_dir)
-        await host.trellis.archive(taskDir)
+        const workspace = swarm?.workspace ?? host.local()?.repository
+        if (!workspace) throw new Error('The local Source is not configured; enable it and set its repository first')
+        const taskDir = localTaskDir(workspace, args.task_dir)
+        await (swarm ? trellisOf(host, swarm) : host.trellis).archive(taskDir)
         return { archived: taskDir }
       },
     }),

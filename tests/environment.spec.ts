@@ -8,6 +8,10 @@ import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-
 import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
+import { ticketEnvironment } from '../src/app/execution-environment.ts'
+import type { Swarm, Ticket } from '../src/core/index.ts'
+import { SettingsSchema } from '../src/policy.ts'
+import type { SourceRegistry } from '../src/sources/registry.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
@@ -158,6 +162,73 @@ describe('ticket directory check', () => {
     const error = await runAsWorker(subprocess(join(dir, 'global')), failing, dir, signal).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(CliError)
     expect(error).toMatchObject({ message: 'nope', exitCode: 3 })
+  })
+})
+
+describe('a swarm ticket\'s execution environment', () => {
+  const deployment = testDeployment({ local: { repository: '/srv/global', baseBranch: 'develop', verify: 'scripts/verify.sh',
+    actor: 'local-user', actorName: 'Local user' } })
+  const settings = SettingsSchema.parse({})
+  /** No Source declares environment variables, so a swarm adds its three keys itself. */
+  const noSources = { environments: () => [] } as unknown as SourceRegistry
+  /** A local Source that declares the three keys plus an unrelated one, as a configured local deployment does. */
+  const localSource = (): SourceRegistry => ({
+    environments: () => [{ kind: { kind: 'local' }, config: {}, environment: {
+      variables: [
+        { key: 'DSH_SUPERAGENT_LOCAL_REPO', description: { zh: '', en: '' } },
+        { key: 'DSH_SUPERAGENT_VERIFY', description: { zh: '', en: '' } },
+        { key: 'DSH_SUPERAGENT_BASE_BRANCH', description: { zh: '', en: '' } },
+        { key: 'DSH_SUPERAGENT_LOCAL_ACTOR', description: { zh: '', en: '' } },
+      ],
+      values: () => ({ DSH_SUPERAGENT_LOCAL_REPO: '/srv/global', DSH_SUPERAGENT_VERIFY: 'old', DSH_SUPERAGENT_BASE_BRANCH: 'main',
+        DSH_SUPERAGENT_LOCAL_ACTOR: 'local-user' }),
+    } }],
+  }) as unknown as SourceRegistry
+  const ticket = (swarmId?: string): Ticket => ({
+    id: 't1', title: 'Work', decisionId: '',
+    mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: { source: 'local', id: 'local-user' }, scope: '' },
+    channels: [], assignments: [], inputs: [], undelivered: [], createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+    origin: { triggerId: '', triggerIds: [] },
+    execution: { name: 'work-abcdef123456', directory: '/tmp/work/work-abcdef123456', assignment: '' },
+    ...swarmId ? { swarmId } : {},
+  })
+  const swarm = (fields: Partial<Swarm> = {}): Swarm => ({
+    id: 'swarm-1', title: 'Swarm', mission: 'Mission', workspace: '/srv/swarm', verify: 'scripts/verify.sh', prepare: '',
+    budget: { maxTasks: 2, maxWorkers: 2, maxRounds: 2 }, status: 'active', masterSessionId: 'orchestrator-swarm-1',
+    createdAt: '2026-10-01T00:00:00.000Z', ...fields,
+  })
+  const byKey = (variables: ReturnType<typeof ticketEnvironment>) => Object.fromEntries(variables.map(variable => [variable.key, variable]))
+
+  it('adds the repository, verify entrypoint and base branch under owner swarm when no local Source declares them', () => {
+    const variables = ticketEnvironment({ deployment, sources: noSources, settings, ticket: ticket('swarm-1'), swarm: swarm() })
+    expect(byKey(variables)).toMatchObject({
+      DSH_SUPERAGENT_LOCAL_REPO: { value: '/srv/swarm', owner: 'swarm' },
+      DSH_SUPERAGENT_VERIFY: { value: 'scripts/verify.sh', owner: 'swarm' },
+      DSH_SUPERAGENT_BASE_BRANCH: { value: 'develop', owner: 'swarm' },
+      DSH_SUPERAGENT_TICKET: { value: 't1', owner: 'executor' },
+      DSH_SUPERAGENT_DIR: { value: '/tmp/work/work-abcdef123456' },
+    })
+  })
+
+  it('updates the local Source\'s declared values in place and leaves its other variables unchanged', () => {
+    const variables = ticketEnvironment({ deployment, sources: localSource(), settings, ticket: ticket('swarm-1'), swarm: swarm() })
+    expect(byKey(variables)).toMatchObject({
+      DSH_SUPERAGENT_LOCAL_REPO: { value: '/srv/swarm', owner: 'local' },
+      DSH_SUPERAGENT_VERIFY: { value: 'scripts/verify.sh', owner: 'local' },
+      DSH_SUPERAGENT_BASE_BRANCH: { value: 'develop', owner: 'local' },
+      DSH_SUPERAGENT_LOCAL_ACTOR: { value: 'local-user', owner: 'local' },
+    })
+    expect(variables.filter(variable => variable.key === 'DSH_SUPERAGENT_LOCAL_REPO')).toHaveLength(1)
+  })
+
+  it('leaves a legacy ticket on the global local values', () => {
+    const variables = ticketEnvironment({ deployment, sources: localSource(), settings, ticket: ticket('legacy'),
+      swarm: swarm({ id: 'legacy', legacy: true, workspace: '', verify: '' }) })
+    expect(byKey(variables)).toMatchObject({
+      DSH_SUPERAGENT_LOCAL_REPO: { value: '/srv/global' },
+      DSH_SUPERAGENT_VERIFY: { value: 'old' },
+      DSH_SUPERAGENT_BASE_BRANCH: { value: 'main' },
+    })
   })
 })
 

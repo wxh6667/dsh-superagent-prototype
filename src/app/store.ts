@@ -2,11 +2,11 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type Repositories, type Thread, type ThreadFact,
-  type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
+import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type Repositories, type Swarm, type Thread,
+  type ThreadFact, type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo12, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 
@@ -51,9 +51,9 @@ export { SCHEMA_VERSION }
 export class Store implements Repositories {
   readonly db: DatabaseSync
   /**
-   * Opens or creates the SQLite database at `path`, migrating schema 10 to schema 11 in a single transaction.
+   * Opens or creates the SQLite database at `path`, migrating schema 10 through schema 12 in a single transaction.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
-   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (11), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
+   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (12), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
   constructor(path: string, private readonly report: (error: unknown) => void = () => {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -73,6 +73,7 @@ export class Store implements Repositories {
             CREATE TABLE IF NOT EXISTS disposition (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS thread (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS ticket (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS swarm (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS decision (id TEXT PRIMARY KEY, thread TEXT NOT NULL, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS trigger_thread (thread TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, human INTEGER NOT NULL,
@@ -86,7 +87,8 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.addColumns()
-          if (migrating) migrateTo11(this)
+          if (version !== undefined && version < 11) migrateTo11(this)
+          if (version !== undefined && version < 12) migrateTo12(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {
@@ -239,6 +241,16 @@ export class Store implements Repositories {
     open: (): Ticket[] => this.values('SELECT value FROM ticket WHERE open = 1 ORDER BY rowid DESC'),
     /** Newest first. */
     active: (): Ticket[] => this.values('SELECT value FROM ticket WHERE active = 1 ORDER BY rowid DESC'),
+  }
+  readonly swarms = {
+    get: (id: string): Swarm | undefined => { const row = this.db.prepare('SELECT value FROM swarm WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Swarm : undefined },
+    save: (swarm: Swarm): void => { this.db.prepare('INSERT INTO swarm VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(swarm.id, JSON.stringify(swarm)) },
+    /** Newest first. */
+    list: (): Swarm[] => this.values('SELECT value FROM swarm ORDER BY rowid DESC'),
+    /** Newest first. */
+    active: (): Swarm[] => this.values("SELECT value FROM swarm WHERE value ->> '$.status' = 'active' ORDER BY rowid DESC"),
+    /** Newest first. */
+    completed: (): Swarm[] => this.values("SELECT value FROM swarm WHERE value ->> '$.status' = 'completed' ORDER BY rowid DESC"),
   }
   readonly decisions = {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },

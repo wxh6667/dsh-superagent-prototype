@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Persistence conventions for the Swarm table, JSON value columns and schema migration."}
+{"file": ".trellis/tasks/11-05-click-to-spawn-swarm/design.md", "reason": "Swarm domain model, schema 12 and legacy migration design."}
+{"file": ".trellis/tasks/11-05-click-to-spawn-swarm/implement.md", "reason": "Phase 1 execution order and validation plan."}

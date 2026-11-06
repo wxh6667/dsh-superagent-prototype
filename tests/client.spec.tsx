@@ -35,13 +35,17 @@ async function render(entry: Entry, props: Record<string, unknown>) {
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
   return { container, dispose: () => { act(() => { root.unmount() }); container.remove() } }
 }
-const openMaster = async (container: HTMLElement) => {
-  const button = [...container.querySelectorAll('button')].find(item => item.textContent === zh.openMaster)!
+const openSwarm = async (container: HTMLElement) => {
+  const button = [...container.querySelectorAll('button')].find(item => item.textContent === zh.swarmOpen)!
   await act(async () => { button.click() })
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
 const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
+  const swarm = { id: 'swarm-1', title: '任务', mission: '修好登录', workspace: '/srv/repo', verify: 'scripts/verify.sh', prepare: '',
+    budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 }, status: 'active', masterSessionId: 'master', createdAt: '2026-11-06T00:00:00Z' }
+  if (path === 'swarms') return Response.json({ items: [swarm], defaultWorkspace: '/srv/repo', legacyMasterId: 'master' })
+  if (path === 'swarms/swarm-1/open') return Response.json({ swarm, masterId: 'master' })
   if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
   if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
     setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
@@ -59,20 +63,22 @@ it('registers a localized main panel, sidebar entry and Plugin Manager row page,
   expect(nav.options.label?.()).toBe('Superagent')
 })
 
-it('opens a listed Session through the workspace from the main panel', async () => {
+it('opens the launcher first and opens a listed swarm master through the workspace', async () => {
   serve()
   const { ctx, main } = fixture(['master'])
   const view = await render(main, { t })
-  await openMaster(view.container)
+  const selected = view.container.querySelector('[role="tab"][aria-selected="true"]')
+  expect(selected?.textContent).toBe(zh['tab.swarms'])
+  await openSwarm(view.container)
   expect(ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('master')
   view.dispose()
 })
 
-it('reports a Session missing from the catalog in the interface language', async () => {
+it('reports a swarm master missing from the catalog in the interface language', async () => {
   serve()
   const { ctx, main } = fixture([])
   const view = await render(main, { t })
-  await openMaster(view.container)
+  await openSwarm(view.container)
   expect(ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
   expect(document.body.textContent).toContain(zh.sessionNotListed)
   view.dispose()

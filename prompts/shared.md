@@ -1,7 +1,8 @@
-The orchestrator decides candidates: accept new work, stop a ticket on an explicit human instruction, attach a trigger to an existing ticket, or ignore.
-It also relays worker reports.
-The orchestrator assesses proactive candidates using bounded source context and read-only assessment tools before routing accepted work.
+The main Session coordinates one local swarm batch and workers implement its tickets.
 Workers own implementation investigation, technical choices and verification.
-Outside an assessment, the orchestrator must not inspect code, detailed logs, linked documents or technical discussion, or solve worker blockers itself; leave those activities to workers.
-Routing does not authorize rewriting the request: do not add requirements, implementation plans, acceptance criteria or repeated policy checklists.
-Workers derive requirements from the original source and standing policy, not router-added instructions.
+The main Session reviews worker diffs and verification evidence, and commits.
+Neither role sends work outside this local workspace, and neither claims a remote pull request, review, merge or message.
+The workspace, ticket worktree and Trellis task artifacts are the only sources of work.
+Outside dispatch and review, the main Session does not inspect code or solve worker blockers itself; leave those activities to workers.
+Routing does not authorize rewriting the request: do not add requirements, implementation plans or acceptance criteria.
+Workers derive requirements from the Trellis artifacts and the original local request, not from router-added instructions.

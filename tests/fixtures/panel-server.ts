@@ -7,11 +7,9 @@ import { z } from 'zod'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
-  environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
-import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
-  ThreadRow, TicketPageView,
-  TicketRow, TicketStage,
-  TriggerRow } from '../../src/client/api.ts'
+  environmentSection, promptParts } from '../../src/app/prompts.ts'
+import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, SwarmView,
+  ThreadPageView, ThreadRow, TicketPageView, TicketRow, TicketStage, TriggerRow } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
@@ -20,6 +18,7 @@ import { githubChannel } from '../../src/sources/github-trigger.ts'
 import { feishuKind } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import type { Health } from '../../src/sources/host.ts'
+import { localKind } from '../../src/sources/local.ts'
 import type { SourceKind } from '../../src/sources/kind.ts'
 import { testDeployment } from './deployment.ts'
 
@@ -44,6 +43,11 @@ const TICKET = {
 } satisfies TicketFields
 export const ticketSummary = (fields: Partial<TicketFields> = {}, stage: TicketStage = { stage: 'working' }): TicketRow =>
   ({ ...TICKET, ...fields, ...stage })
+export const swarmSummary = (id: string, status: SwarmView['status'], fields: Partial<SwarmView> = {}): SwarmView => ({
+  id, title: `Swarm ${id}`, mission: `Mission ${id}`, workspace: '/srv/repo', verify: 'scripts/verify.sh', prepare: '',
+  budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 }, status, masterSessionId: `orchestrator-${id}`,
+  createdAt: '2026-11-01T00:00:00Z', ...status === 'completed' ? { completedAt: '2026-11-02T00:00:00Z' } : {}, ...fields,
+})
 export const threadSummary = (fields: Partial<ThreadRow> = {}): ThreadRow => ({
   key: 'feishu:oc_1:om_root', source: 'feishu', title: '这个文案好奇怪', stage: 'subscribed', latest: undefined, lastAt: '2026-09-23T00:00:00Z',
   createdAt: '2026-09-22T00:00:00Z', subscriptions: 1, tickets: [{ id: 't1', title: '修复回归', state: 'open' }], evaluating: undefined,
@@ -69,17 +73,20 @@ export function found(id: string, at: string, { threadTitle, filtered,
 export const promptVersion = (revision: number, config: PromptsView['current']['config']): PromptsView['current'] =>
   ({ revision, previousRevision: revision ? revision - 1 : null, savedAt: '', source: 'panel', config })
 /** Build a dropped outbound reply fixture (`feishu` replies to `oc_1`/`om_root`; `github` comments on PR #42). */
-export const droppedReply = (id: string, hoursAgo: number, source: 'feishu' | 'github', reason: DroppedReply['dropped']['reason'],
+export const droppedReply = (id: string, hoursAgo: number, source: 'feishu' | 'github' | 'local', reason: DroppedReply['dropped']['reason'],
   { ticket, thread }: { ticket?: DroppedReply['ticket']; thread?: false } = {}): DroppedReply => ({
   id, preview: `Reply ${id}`, kind: 'reply',
-  channel: source === 'feishu' ? feishuChannel('oc_1', 'om_root') : githubChannel(42),
+  channel: source === 'feishu' ? feishuChannel('oc_1', 'om_root') : source === 'github' ? githubChannel(42)
+    : { source, thread: 'local:task', address: {} },
   dropped: { at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString(), reason }, ...ticket ? { ticket } : {},
-  ...thread === false ? {} : { thread: source === 'feishu' ? 'feishu:oc_1:om_root' : 'github:42' },
+  ...thread === false ? {} : { thread: source === 'feishu' ? 'feishu:oc_1:om_root' : source === 'github' ? 'github:42' : 'local:task' },
 })
 const dayAgo = () => new Date(Date.now() - 86_400_000).toISOString()
 export const problemOf = (code: SetupCode, values: Record<string, string> = {}) => new SetupError(code, values).problem
-// The kinds' configurations differ, and the fake reads them only as the records the views carry.
-const KINDS = [feishuKind, githubKind] as unknown as SourceKind[]
+// The kinds' configurations differ, and the fake reads them only as the records the views carry. The remote kinds stay
+// listed so their dormant settings remain testable until Phase 4B removes them; the Source status shows only the Local Source.
+const KINDS = [feishuKind, githubKind, localKind] as unknown as SourceKind[]
+const STATUS_KINDS = KINDS.filter(kind => kind.kind === 'local')
 export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000, admissionContextMaxPages: 10,
   admissionContextTimeoutMs: 15000 }
 
@@ -88,6 +95,10 @@ export interface PanelServer {
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
+  /** Swarms newest first, as `GET swarms` returns them, and the local Source's pre-filled workspace. */
+  swarms: SwarmView[]; defaultWorkspace: string
+  /** When set, open and finish refuse with this message. */
+  swarmError?: string
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
@@ -114,6 +125,7 @@ export let server: PanelServer
 function resolved() {
   const accounts = server.setup.accounts
   return accounts ? testDeployment({ repository: accounts.repository, github: { cli: '/bin/false', login: accounts.agent, noreply: '' },
+    local: { repository: server.defaultWorkspace, baseBranch: 'main', verify: 'scripts/verify.sh', actor: 'local-user', actorName: 'Local user' },
     ...accounts.feishu ? { feishu: { cli: '/bin/false', ...accounts.feishu } } : { feishu: undefined } }) : undefined
 }
 /** Default source health: paused during setup; Feishu defaults to `socket closed` unless overridden or paused by setup. */
@@ -143,17 +155,16 @@ function sourceSettings(): SourceView[] {
   })
 }
 function sourceStatuses(): SourceStatusRow[] {
-  return KINDS.map(kind => {
+  return STATUS_KINDS.map(kind => {
     const enabled = server.settings.sources[kind.kind]?.enabled ?? true
     const health = kind.health.map(name => ({ name, ...healthOf(name) }))
     const problem = problemOf_(kind.kind)
     const state = !enabled ? 'off' : problem || health.some(item => item.state === 'error') ? 'error' : server.setup.problem ? 'setup'
       : health.some(item => item.state === 'starting') ? 'starting' : health.some(item => item.state === 'paused') ? 'paused' : 'ready'
-    const feishu = kind.kind === 'feishu'
     return { id: kind.kind, title: kind.title, installed: true, enabled, state, health, ...problem ? { problem } : {},
-      stats: { received: feishu ? 12 : 0, filtered: feishu ? 2 : 0, lastAt: '2026-09-23T00:00:00Z' },
-      filtered: feishu ? [] : [{ id: 'e9', at: '2026-09-23T00:02:00Z', actor: actor('github', 'someone'), preview: 'looks wrong',
-        reason: { code: 'source_disabled' } }],
+      stats: { received: 12, filtered: 2, lastAt: '2026-09-23T00:00:00Z' },
+      filtered: [{ id: 'l9', at: '2026-09-23T00:02:00Z', actor: { source: 'local', id: 'local-user', name: { zh: '本地用户',
+        en: 'Local user' } }, preview: 'looks wrong', reason: { code: 'source_disabled' } }],
       dropped: server.dropped.filter(item => item.channel.source === kind.kind && item.dropped.at >= dayAgo()) }
   })
 }
@@ -238,7 +249,9 @@ function initial(): PanelServer {
       rules: [{ id: 'copy', name: '文案修改', enabled: true, instruction: '修正明确的文案错误' }] },
     sources: { feishu: { enabled: true, config: { cli: 'lark-bot', chats: [{ chatId: 'oc_team', listen: 'mentions' }],
       directMessages: true } },
-      github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh-agent' } } },
+      github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh-agent' } },
+      local: { enabled: true, config: { repository: '/srv/repo', baseBranch: 'main', verify: 'scripts/verify.sh',
+        actor: 'local-user', actorName: 'Local user' } } },
     executor: { blockedCommands: ['gh-personal'] },
   })
   const ended = ticketSummary({ id: 't0', title: '旧工单', state: 'ended', actions: { retry: false, stop: false },
@@ -252,7 +265,11 @@ function initial(): PanelServer {
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
-    prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
+    swarms: [swarmSummary('swarm-active', 'active', { title: '登录回归', mission: '修好登录页的回归' }),
+      swarmSummary('swarm-done', 'completed', { title: '已完成的任务', mission: '整理文档' }),
+      swarmSummary('legacy', 'completed', { title: '历史记录', mission: '迁移前的工单', masterSessionId: '', legacy: true })],
+    defaultWorkspace: '/srv/repo',
+    prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: [],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
       defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
@@ -292,6 +309,32 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
+  'GET swarms': { answer: () => ({ items: server.swarms, defaultWorkspace: server.defaultWorkspace, legacyMasterId: 'master' }) },
+  'POST swarms': { body: true, answer: ({ body }) => {
+    const id = `swarm-${server.swarms.length + 1}`
+    const swarm: SwarmView = { id, title: body.title, mission: body.mission, ...body.acceptance ? { acceptance: body.acceptance } : {},
+      ...body.scope ? { scope: body.scope } : {}, workspace: body.workspace, verify: body.verify || 'scripts/verify.sh',
+      prepare: body.prepare ?? '', budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3, ...body.budget }, status: 'active',
+      masterSessionId: `orchestrator-${id}`, createdAt: '2026-11-06T00:00:00Z' }
+    server.swarms = [swarm, ...server.swarms]
+    return { swarm, masterId: swarm.masterSessionId }
+  } },
+  'POST swarms/:id/open': { answer: ({ params }) => {
+    if (server.swarmError) return refuse(400, server.swarmError)
+    const swarm = server.swarms.find(item => item.id === params.id)
+    if (!swarm) return refuse(400, `Unknown swarm ${params.id}`)
+    if (swarm.status !== 'active' || swarm.legacy) return refuse(400, `Swarm ${params.id} is not active`)
+    return { swarm, masterId: swarm.masterSessionId }
+  } },
+  'POST swarms/:id/finish': { answer: ({ params }) => {
+    if (server.swarmError) return refuse(400, server.swarmError)
+    const swarm = server.swarms.find(item => item.id === params.id)
+    if (!swarm) return refuse(400, `Unknown swarm ${params.id}`)
+    if (swarm.status !== 'active' || swarm.legacy) return refuse(400, `Swarm ${params.id} is not active`)
+    const completed: SwarmView = { ...swarm, status: 'completed', completedAt: '2026-11-06T00:00:00Z' }
+    server.swarms = server.swarms.map(item => item.id === params.id ? completed : item)
+    return { swarm: completed }
+  } },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
@@ -389,11 +432,10 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { revision: server.prompts.revision, context_delivery: 'injected' }
   } },
   'POST prompts/preview': { body: true, answer: ({ body }) => {
-    const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], 'github', ...Object.keys(body.skills)].map(name => [name,
-      composeSkill(body, name)])
-    // The generated parts from their templates, without variables or rules.
-    const environment = environmentSection(body, []), policy = policySection(SettingsSchema.parse({ policy: { rules: [] } }), body)
-    return { parts: { orchestrator: promptParts(body, 'orchestrator', environment, policy), worker: promptParts(body, 'worker', environment) },
+    const skills = Object.keys(body.skills).map(name => [name, composeSkill(body, name)])
+    // The generated environment from its template, without variables.
+    const environment = environmentSection(body, [])
+    return { parts: { orchestrator: promptParts(body, 'orchestrator', environment), worker: promptParts(body, 'worker', environment) },
       skills: Object.fromEntries(skills),
       orchestrator: composePrompt(body, 'orchestrator'), worker: composePrompt(body, 'worker'), scope: '' }
   } },

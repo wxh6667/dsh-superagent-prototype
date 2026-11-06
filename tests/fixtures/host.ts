@@ -15,7 +15,8 @@ import { feishuKind, feishuTrigger } from '../../src/sources/feishu.ts'
 import { githubKind } from '../../src/sources/github.ts'
 import { Commands } from '../../src/infra/commands.ts'
 import { credentialHelper, workerGitConfig } from '../../src/infra/environment.ts'
-import type { Trigger } from '../../src/core/index.ts'
+import { reasonText, type Trigger } from '../../src/core/index.ts'
+import { ticketCard } from '../../src/app/cards.ts'
 import { testMachine } from './deployment.ts'
 
 export const MEMBER = 'ou_alice'
@@ -267,11 +268,25 @@ export async function startRuntime(seed?: (store: Store) => void) {
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
     return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
   }
-  /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
+  /** Record one routing decision through the Engine, answering as the retired routing tool did; a refused one throws its reason. */
   async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
-    if (results[0]!.refused) throw new Error(String(results[0]!.refused))
-    return results[0]!
+    const kind = item.kind as 'accept' | 'attach' | 'ignore' | 'stop'
+    if (kind === 'attach') {
+      const ticket = runtime.engine.attach(String(item.ticket_id), String(item.trigger_id), item.note as string | undefined)
+      await runtime.pump()
+      return { reason: 'Attached', ticket: ticketCard(ticket) }
+    }
+    const note = item.note as string | undefined
+    const outcome = kind === 'accept'
+      ? { kind: 'accept' as const, title: String(item.title), scope: String(item.scope ?? item.title), reason: { code: 'explicitRouted' },
+        acknowledgement: item.acknowledgement as string | undefined, name: item.worktree_name as string | undefined, ...(note ? { note } : {}) }
+      : kind === 'stop'
+        ? { kind: 'stop' as const, ticketId: String(item.ticket_id), reason: (item.reason as string | undefined) ?? { code: 'humanStop' } }
+        : { kind: 'ignore' as const, reason: (item.reason as string | undefined) ?? 'ignored' }
+    const decision = runtime.engine.decide(String(item.trigger_id), outcome)
+    await runtime.pump()
+    const ticket = decision.ticketId ? runtime.store.tickets.get(decision.ticketId) : undefined
+    return { decision: decision.kind, reason: reasonText(decision.reason), ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
   }
   async function acceptedTicket(trigger: Trigger) {
     runtime.receive(trigger)

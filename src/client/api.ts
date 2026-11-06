@@ -117,6 +117,8 @@ export function caller(messages: () => ApiMessages): Call {
 }
 
 export type StateView = ApiResponse<'GET state'>
+export type SwarmsView = ApiResponse<'GET swarms'>
+export type SwarmView = SwarmsView['items'][number]
 export type SetupView = StateView['setup']
 export type SettingsView = ApiResponse<'GET settings'>
 export type Settings = { [B in keyof SettingsView['blocks']]: SettingsView['blocks'][B]['value'] }

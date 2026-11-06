@@ -9,7 +9,7 @@ usePanel()
 it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
-  expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['概览', '来源', '触发', '评估', '执行', '设置'])
+  expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['Swarm', '概览', '来源', '触发', '评估', '执行', '设置'])
   expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['待处理工单2', '系统问题2', '过去 24 小时详情 ›', '执行器详情 ›'])
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual(['待回答', '待处理失败'])
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toEqual(['飞书 来源异常', '评估未完成：这个文案好奇怪'])
@@ -140,7 +140,7 @@ it('lists the unavailable Evals one by one, without the health entry that counts
 })
 
 it('says when no Source is on, an Eval is past its deadline or a message keeps failing, each with the way to it', async () => {
-  for (const kind of ['feishu', 'github']) server.settings.sources[kind] = { ...server.settings.sources[kind]!, enabled: false }
+  for (const kind of ['feishu', 'github', 'local']) server.settings.sources[kind] = { ...server.settings.sources[kind]!, enabled: false }
   server.threads = [threadSummary({ key: 'github:9', title: '#9 迟迟未决', stage: 'evaluating',
     evaluating: { id: 'v9', triggers: 1, strength: 'inferred', startedAt: '2026-08-31T23:58:00Z', deadline: '2026-09-01T00:00:00Z' } })]
   server.failing = [{ id: 'm1', channel: { source: 'github', thread: 'github:42', address: { number: '42' } },

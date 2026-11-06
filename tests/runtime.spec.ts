@@ -22,16 +22,18 @@ import { SettingsSchema, policyVersion, type SettingsOrigin } from '../src/polic
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
+import { localKind } from '../src/sources/local.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
-import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
+import { UserError, key, reasonText, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
+import { ticketCard } from '../src/app/cards.ts'
 import { feishuTrigger } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
 import { IM_WORDS } from '../src/infra/text.ts'
-import { observePull, pullOf } from '../src/sources/github-pull.ts'
 import { credentialHelper, workerGitConfig } from '../src/infra/environment.ts'
 import { policyHistory } from '../src/app/settings-history.ts'
 import { overview } from '../src/app/views/overview.ts'
+import { droppedReplies } from '../src/app/views/sources.ts'
 import { preview, readable } from '../src/app/views/text.ts'
 import { decisionList, search, threadDetail, threadList } from '../src/app/views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
@@ -125,11 +127,25 @@ function feishu(id: string, text: string, overrides: Record<string, unknown> = {
   return feishuTrigger({ message_id: `om_${id}`, chat_id: CHAT, chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: text, create_time: String(Date.parse('2026-09-09T00:00:00Z') + Number(id.replace(/\D/g, '') || 0) * 1000), mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
 }
 const worktreeName = 'fix-regression'
-/** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
+/** Record one routing decision through the Engine, answering as the retired routing tool did; a refused one throws its reason. */
 async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const { results } = await runTool(runtime.masterId, 'orchestrator_route', { decisions: [item] }) as { results: Record<string, unknown>[] }
-  if (results[0]!.refused) throw new Error(String(results[0]!.refused))
-  return results[0]!
+  const kind = item.kind as 'accept' | 'attach' | 'ignore' | 'stop'
+  if (kind === 'attach') {
+    const ticket = runtime.engine.attach(String(item.ticket_id), String(item.trigger_id), item.note as string | undefined)
+    await runtime.pump(); await runtime.idle()
+    return { reason: 'Attached', ticket: ticketCard(ticket) }
+  }
+  const note = item.note as string | undefined
+  const outcome = kind === 'accept'
+    ? { kind: 'accept' as const, title: String(item.title), scope: String(item.scope ?? item.title), reason: { code: 'explicitRouted' },
+      acknowledgement: item.acknowledgement as string | undefined, name: item.worktree_name as string | undefined, ...(note ? { note } : {}) }
+    : kind === 'stop'
+      ? { kind: 'stop' as const, ticketId: String(item.ticket_id), reason: (item.reason as string | undefined) ?? { code: 'humanStop' } }
+      : { kind: 'ignore' as const, reason: (item.reason as string | undefined) ?? 'ignored' }
+  const decision = runtime.engine.decide(String(item.trigger_id), outcome)
+  await runtime.pump(); await runtime.idle()
+  const ticket = decision.ticketId ? runtime.store.tickets.get(decision.ticketId) : undefined
+  return { decision: decision.kind, reason: reasonText(decision.reason), ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
 }
 async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
   await receive(trigger)
@@ -229,7 +245,7 @@ afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await 
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
   const candidate = relays(runtime.masterId).find(item => item.kind === 'candidate')!
-  expect(candidate).toMatchObject({ strength: 'explicit', trigger_id: trigger.id, next_action: 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.' })
+  expect(candidate).toMatchObject({ strength: 'explicit', trigger_id: trigger.id, next_action: 'Local work starts from a confirmed plan with orchestrator_local_dispatch; this card is informational.' })
   expect(ticket).toMatchObject({ title: '修复回归', mandate: { strength: 'explicit', basis: expect.objectContaining({ via: 'addressed', source: 'feishu', sender: 'Alice', addressed: 'mention', scope: expect.objectContaining({ chatId: CHAT }) }) },
     execution: expect.objectContaining({ name: expect.stringMatching(/^fix-regression-/) }), origin: expect.objectContaining({ triggerId: trigger.id }) })
   expect(ticket).not.toHaveProperty('ended')
@@ -272,62 +288,7 @@ it('fans a person\'s later thread message out to the live worker as context and 
     .toMatchObject({ trigger_id: followup.id, around: { before: expect.objectContaining({ read: `trigger/${key('feishu', 'om_1')}` }) } })
 })
 
-it('assesses a proactive observation in the orchestrator Session and creates the ticket only on a positive auto-mode decision', async () => {
-  const observe = (mode: 'observe' | 'auto') => runtime.settings.save('eval', { ...runtime.store.settings().eval, mode }, runtime.store.blockRevision('eval'), 'panel')
-  await observe('observe')
-  const trigger = feishu('3', '这个文案好奇怪，改成“浏览网页”吧', { mentions: [] })
-  await receive(trigger)
-  const candidate = relays(runtime.masterId).at(-1)!
-  expect(candidate).toMatchObject({ kind: 'candidate', strength: 'inferred', mode: 'observe', next_action: expect.stringContaining('orchestrator_eval') })
-  vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_3', chat_id: CHAT }] })
-  const details = await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
-  // The rules are in the main Session's Policy section; the context names the Policy version it was built from.
-  expect(details).not.toHaveProperty('rules')
-  expect(details).toMatchObject({ trigger_id: trigger.id, strength: 'inferred', policy_version: policyVersion(runtime.store.settings()), thread: expect.objectContaining({ complete: true, loaded_messages: 0 }) })
-  const decision = (id: string) => ({ trigger_id: id, decision: 'accept', title: '文案修订', worktree_name: 'copy-fix', scope: '改副标题', reason: 'explicit copy change', intent_evidence: 'quoted', acknowledgement: '收到，把副标题改成“浏览网页”。',
-    rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'copy change' }, { rule_id: 'visual', matched: false, reason: 'not visual' }],
-    direction: { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'the message names the replacement' } })
-  expect(await runTool(runtime.masterId, 'orchestrator_eval_decide', decision(trigger.id))).toMatchObject({ decision: 'ignore', reason: expect.stringContaining('Observe mode') })
-  expect(runtime.store.tickets.list()).toEqual([])
-  expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_3`)[0]!.audit).toMatchObject({ would_accept: true, proposal: { title: '文案修订' } })
-  await observe('auto')
-  const again = feishu('5', '把副标题改成“浏览网页”', { mentions: [] })
-  await receive(again)
-  await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: again.id })
-  const accepted = await runTool(runtime.masterId, 'orchestrator_eval_decide', decision(again.id))
-  expect(accepted).toMatchObject({ decision: 'accept', ticket: { ticket_id: expect.any(String) } })
-  const ticket = runtime.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
-  expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ via: 'admission', rules: ['copy'], observation: { mode: 'auto' } }) })
-  expect(runtime.store.replyStatus(key('ack', again.id))).toBeDefined()
-  expect(await runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}/assignment` })).toMatchObject({ text: expect.stringContaining('Proactively accepted under copy') })
-})
-
-it('accepts silently under a rule that says so, gives the worker the rule procedure, and closes it as dropped when nothing is left for a human', async () => {
-  const policy = runtime.store.settings().policy
-  await runtime.settings.save('policy', { ...policy, rules: [...policy.rules, { id: 'silent-bugfix', name: '沉默地复现和修复', enabled: true, instruction: 'Reproduce minimally first; accept silently.' }] }, runtime.store.blockRevision('policy'), 'panel')
-  await runtime.settings.save('eval', { ...runtime.store.settings().eval, mode: 'auto' }, runtime.store.blockRevision('eval'), 'panel')
-  const trigger = feishu('20', '切换主题后刷新，图标颜色不对', { mentions: [] })
-  await receive(trigger)
-  vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_20', chat_id: CHAT }] })
-  await runTool(runtime.masterId, 'orchestrator_eval', { trigger_id: trigger.id })
-  const accepted = await runTool(runtime.masterId, 'orchestrator_eval_decide', { trigger_id: trigger.id, decision: 'accept', title: '主题图标颜色', worktree_name: 'theme-icon-color', scope: 'bug', reason: 'reported defect', intent_evidence: 'quoted',
-    rule_assessments: [{ rule_id: 'copy', matched: false, reason: 'no' }, { rule_id: 'visual', matched: false, reason: 'no' }, { rule_id: 'silent-bugfix', matched: true, reason: 'bug report' }],
-    direction: { implementation_requested: true, target_basis: 'existing-standard', requires_design_decision: false, evidence: 'expected colour is the light palette' } })
-  const ticket = runtime.store.tickets.get((accepted.ticket as { ticket_id: string }).ticket_id)!
-  expect(runtime.store.replyStatus(key('ack', trigger.id))).toBeUndefined()
-  await runtime.idle()
-  expect(sections.get(`worker-${ticket.id}`)!.text({})).toContain(mandateInstructions({ strength: 'inferred' }))
-  expect(await runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}/assignment` })).toMatchObject({ text: expect.stringContaining('沉默地复现和修复 (silent-bugfix): Reproduce minimally first; accept silently.') })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
-  await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'blocked', summary: 'needs a decision' })
-  await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: 'x' })).rejects.toThrow('not ready')
-  // Nothing left for a human: the ticket closes instead of waiting, and the rule's closing sentence can still be delivered.
-  await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'dropped', summary: 'too complex; recorded in #123' })
-  expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ by: 'executor', outcome: 'dropped' }) })
-  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '看到这个问题我试了一下，能复现，修复需要较大改动，已记在 #123。' })).toEqual({ status: 'sent' })
-})
-
-it('records worker reports, binds the task PR, ends the ticket on ready without a PR, and relays attention', async () => {
+it('records worker reports, clears attention, ends the ticket on ready, and relays attention', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   deliveries.mockClear()
   expect(await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'started' })).toMatchObject({ notification: 'internal_only' })
@@ -337,32 +298,19 @@ it('records worker reports, binds the task PR, ends the ticket on ready without 
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_attention', ticket: { ticket_id: ticket.id, attention: { question: 'Desktop too?' } } })
   await expect(runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'other', text: 'x' })).rejects.toThrow('current attention question')
   expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: 'Desktop too?', text: '要不要也改桌面端？' })).toEqual({ status: 'sent' })
-  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42, human_action: null })
-  const bound = runtime.store.tickets.get(ticket.id)!
-  expect(pullOf(bound)).toBe(42)
-  expect(bound.attention).toBeUndefined()
-  expect(runtime.store.threads.get('github:42')?.subscriptions).toEqual([ticket.id])
+  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'still working', human_action: null })
+  expect(runtime.store.tickets.get(ticket.id)!.attention).toBeUndefined()
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'reviewed' })
-  expect(runtime.store.tickets.get(ticket.id)!.ended).toBeUndefined()
+  expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ by: 'executor', outcome: 'completed' }) })
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'ready' })
-  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '已提交 PR #42，待 review。' })).toEqual({ status: 'sent' })
-  const mergedAt = new Date().toISOString()
-  const merged = { number: 42, state: 'closed', merged: true, merged_at: mergedAt, html_url: 'https://github.com/acme/widgets/pull/42',
-    user: { login: 'agent-bot' }, head: { sha: 'abc', ref: 'agent/x', repo: { full_name: 'acme/widgets' } } }
-  await observePull(runtime.context(githubKind), merged)
-  const ended = runtime.store.tickets.get(ticket.id)!
-  expect(ended).toMatchObject({ ended: expect.objectContaining({ by: 'executor', outcome: 'merged' }) })
-  // The ended ticket keeps its Subscription to the PR, so a later human comment there resumes it.
-  expect(runtime.store.threads.get('github:42')?.subscriptions).toEqual([ticket.id])
+  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'result', text: '已完成并验证。' })).toEqual({ status: 'sent' })
   // Its worker's last word was its ready report, so its turn is not cancelled: it ends it itself.
   expect(agents.get(sessionId)!.cancel).not.toHaveBeenCalled()
-  const notice = runtime.store.receipts.waiting().find(item => item.kind === 'notice')
-  expect(notice ?? runtime.store.replyStatus(key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged'))).toBeTruthy()
 })
 
 it('lists each ticket with the Threads it subscribes to, as their Sources describe them', async () => {
-  const { sessionId, ticket } = await acceptedTicket()
-  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42 })
+  const { ticket } = await acceptedTicket()
+  runtime.engine.bindThread(ticket.id, { source: 'github', id: '42' }, true)
   const line = () => ticketList(viewsOf(runtime), 'working', 0, 20).items.find(item => item.id === ticket.id)!
   runtime.store.threads.describe('github:42', { label: '#42 Fix the margin', facts: { number: { value: '#42' }, ci: { label: 'CI', value: { zh: '通过', en: 'passed' } } } })
   expect(line()).not.toHaveProperty('prNumber')
@@ -567,44 +515,26 @@ it('projects read models for the management page and removes thread subscription
   expect((await api('GET', 'state')).body).not.toHaveProperty('tickets')
   // scripts/dsh-superagent and agents read health from GET state (docs/006, Management API); settings and their revisions have their own route.
   expect((await api('GET', 'state')).body).toMatchObject({ health: { runtime: { state: expect.any(String) } }, paused: false, load: { maxWorkers: 3 } })
-  expect((await api('GET', 'settings')).body).toMatchObject({ sources: expect.arrayContaining([expect.objectContaining({ id: 'github',
-    revision: expect.any(Number), value: expect.objectContaining({ enabled: true }) })]), blocks: { policy: { revision: expect.any(Number) } } })
+  expect((await api('GET', 'settings')).body).toMatchObject({ sources: expect.arrayContaining([expect.objectContaining({ id: 'local',
+    kind: 'local', revision: expect.any(Number) })]), blocks: { policy: { revision: expect.any(Number) } } })
   expect((await api('POST', `threads/${encodeURIComponent(threadKeyValue)}/unsubscribe`)).body).toMatchObject({ removed: true })
   expect(threadList(viewsOf(runtime), 'subscribed', 0, 20).items).toEqual([])
   expect(agents.get(runtime.masterId)!.inject).toHaveBeenCalled()
 })
 
-it('lets an Executor drop only its own ticket from a thread it finds unrelated, but not the thread it started on or its pull request\'s', async () => {
-  const { ticket, trigger, sessionId } = await acceptedTicket()
-  const other = await acceptedTicket(feishu('5', '@bot 另一件事'))
-  // An attached thread that turns out to be about something else, which another ticket also follows.
-  const attached = { source: 'feishu', id: 'oc_side:om_side' }
-  subscribe(ticket.id, attached); subscribe(other.ticket.id, attached)
-  const inject = agents.get(runtime.masterId)!.inject
-  vi.mocked(inject).mockClear()
-  expect(await runTool(sessionId, 'orchestrator_thread_unrelated', { thread: 'feishu:oc_side:om_side', reason: 'It discusses the login page, not this regression.' })).toEqual({ removed: true, thread: 'feishu:oc_side:om_side' })
-  expect(runtime.store.threads.get('feishu:oc_side:om_side')!.subscriptions).toEqual([other.ticket.id])
-  await vi.waitFor(() => expect(JSON.stringify(vi.mocked(inject).mock.calls)).toContain('thread_unrelated'))
-  await expect(runTool(sessionId, 'orchestrator_thread_unrelated', { thread: 'feishu:oc_side:om_side', reason: 'again' })).rejects.toThrow('does not follow that thread')
-  await expect(runTool(sessionId, 'orchestrator_thread_unrelated', { thread: threadKey(trigger.threads[0]!), reason: 'no' })).rejects.toThrow('the ticket started on')
-  runtime.engine.bindThread(ticket.id, { source: 'github', id: '7' }, true)
-  await expect(runTool(sessionId, 'orchestrator_thread_unrelated', { thread: 'github:7', reason: 'no' })).rejects.toThrow('pull request')
-  // A worker drops only its own ticket: the other ticket's thread is not one this ticket follows.
-  await expect(runTool(sessionId, 'orchestrator_thread_unrelated', { thread: threadKey(other.trigger.threads[0]!), reason: 'no' })).rejects.toThrow('does not follow that thread')
-})
-
-it('reports a Source that was switched on as starting until its next pass reports its health', async () => {
-  const save = (enabled: boolean) => runtime.settings.save('source:github', { enabled, config: runtime.store.settings().sources.github!.config }, runtime.store.blockRevision('source:github'), 'panel')
-  const github = async () => ((await api('GET', 'sources')).body as { id: string; health: unknown[] }[]).find(source => source.id === 'github')!.health
+it('reports the Local Source switched on as starting until its next pass reports its health', async () => {
+  const config = runtime.sources.instance('local')!.config
+  const save = (enabled: boolean) => runtime.settings.save('source:local', { enabled, config }, runtime.store.blockRevision('source:local'), 'panel')
+  const local = async () => ((await api('GET', 'sources')).body as { id: string; health: unknown[] }[]).find(source => source.id === 'local')!.health
   await save(false)
-  runtime.context(githubKind).report('github', { state: 'paused', detail: 'Off', code: 'sourceOff' })
+  runtime.context(localKind).report('local', { state: 'paused', detail: 'Off', code: 'sourceOff' })
   await save(true)
-  expect(await github()).toEqual([{ name: 'github', state: 'starting', detail: '' }])
-  // A part that reports something else, such as a missing CLI, keeps its report: no pass may come to replace it.
+  expect(await local()).toEqual([{ name: 'local', state: 'starting', detail: '' }])
+  // A part that reports something else, such as a waiting deployment check, keeps its report: no pass may come to replace it.
   await save(false)
-  runtime.context(githubKind).report('github', { state: 'paused', detail: 'x', code: 'feishuCliUnset' })
+  runtime.context(localKind).report('local', { state: 'paused', detail: 'x', code: 'setupPending' })
   await save(true)
-  expect(await github()).toEqual([expect.objectContaining({ code: 'feishuCliUnset' })])
+  expect(await local()).toEqual([expect.objectContaining({ code: 'setupPending' })])
 })
 
 it('records each settings save with its policy change and the open tickets told about it', async () => {
@@ -1030,8 +960,10 @@ it('tells both roles the execution environment through a generated prompt sectio
   expect(section.text).not.toContain('MERGE_ACCOUNT')
   // Outside a ticket there is no ticket directory.
   expect(section.text).not.toContain('DSH_SUPERAGENT_DIR')
-  // The main Session's Policy section follows it.
-  expect(preview.orchestrator).toContain(`${section.text}\n\n## Policy`)
+  // The execution environment is the last section of both prompts.
+  expect(preview.parts.orchestrator.at(-1)!.name).toBe('runtime/environment')
+  expect(preview.orchestrator.endsWith(section.text)).toBe(true)
+  expect(preview.orchestrator).not.toContain('## Policy')
   const { ticket, sessionId } = await acceptedTicket()
   expect(sections.get(sessionId)!.text({})).toContain(`- DSH_SUPERAGENT_DIR = ${JSON.stringify(ticket.execution!.directory)}`)
   expect(sections.get(runtime.masterId)!.text({})).not.toContain('DSH_SUPERAGENT_DIR')
@@ -1074,15 +1006,14 @@ it('passes team text with template braces to every Session literally, without re
   }
 })
 
-it('leaves auto-merge to the delivery requirements, with the agent\'s own gh and the line threshold', async () => {
+it('keeps delivery local: the main Session commits after review and workers never do', async () => {
   const { ticket } = await acceptedTicket()
   expect(runtime.ticketEnvironment(ticket).map(variable => variable.key)).not.toContain('DSH_SUPERAGENT_GITHUB_MERGE_ACCOUNT')
   expect(ticket.mandate).not.toHaveProperty('autoMergeLineLimit')
   const delivery = runtime.prompts.current().config.delivery
-  expect(delivery).toContain('it changes fewer than 200 lines (additions plus deletions);')
-  // Auto-merge is never enabled as the agent account; only a merge CLI the section names enables it.
-  expect(delivery).toContain('Never enable auto-merge as the agent account')
-  expect(delivery).toContain('<merge CLI> pr merge <number> --auto --merge --match-head-commit <sha>')
+  expect(delivery).toContain('The main Session commits in the target repository after reviewing the worker diff and verification evidence.')
+  expect(delivery).toContain('Workers never commit, push or open a pull request.')
+  expect(delivery).not.toContain('auto-merge')
   expect(runtime.prompts.preview(runtime.prompts.current().config).worker).not.toContain('gh-merge')
 })
 
@@ -1141,13 +1072,13 @@ it('runs a GitHub-only deployment: the GitHub part of the Policy decides alone, 
 })
 
 
-it('credits each human reviewer once in the default delivery requirements on every commit of the PR, never with an empty commit', async () => {
+it('requires visual evidence, the local commit and its verification record in the default delivery requirements', async () => {
   const delivery = runtime.prompts.current().config.delivery
-  expect(delivery).toContain('Co-authored-by: <name or login> <id+login@users.noreply.github.com>')
-  expect(delivery).toContain('on every commit of the PR branch')
-  expect(delivery).toContain('git filter-branch -f --msg-filter')
-  expect(delivery).toContain('Never push an empty commit to credit a reviewer.')
-  expect(delivery).toContain('Do not credit bots')
+  expect(delivery).toContain('BOTH Before and After visual evidence')
+  expect(delivery).toContain('The main Session commits in the target repository')
+  expect(delivery).toContain('Record the commit hash and the verification command and result')
+  expect(delivery).not.toContain('Co-authored-by')
+  expect(delivery).not.toContain('auto-merge')
 })
 
 it('shows a failed reply as a problem with its attempts, an error of the reply effects after three, until it is withdrawn', async () => {
@@ -1226,22 +1157,6 @@ it('keeps the receipt of a message withdrawn while it went out, so its id is not
   expect([runtime.store.receipts.get('raced'), runtime.effects.pending('reply')]).toEqual([expect.objectContaining({ text: 'Done', status: 'sent' }), false])
 })
 
-it('resumes several ended tickets on one thread from one message without the launch waiting on itself', async () => {
-  const first = await acceptedTicket()
-  const other = feishu('30', '@bot 顺手把这里也改了', { root_id: undefined })
-  await receive(other)
-  await route({ kind: 'attach', ticket_id: first.ticket.id, trigger_id: other.id })
-  // A request on the first ticket's thread becomes a second ticket there once the first's worker hands it back.
-  const another = feishu('31', '@bot 另一件事', { root_id: 'om_1' })
-  await receive(another)
-  await runTool(first.sessionId, 'orchestrator_trigger_handback', { trigger_id: another.id, reason: 'Another change.' })
-  const second = await acceptedTicket(another)
-  for (const ticket of [first, second]) await runTool(ticket.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'nothing to do' })
-  await receive(feishu('32', '还有问题', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' }))
-  await vi.waitFor(() => expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.ended)).toEqual([undefined, undefined]), { timeout: 3000 })
-  await vi.waitFor(() => expect([first, second].map(ticket => runtime.store.tickets.get(ticket.ticket.id)!.assignments.at(-1)!.state)).toEqual(['running', 'running']), { timeout: 3000 })
-})
-
 it('attaches a message to an ended ticket and so resumes it', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'nothing to do' })
@@ -1292,7 +1207,7 @@ it('drops a message only when its conversation is gone or not listened to, newes
   vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 5000 })
   try { await runtime.sendReplies() } finally { vi.useRealTimers() }
   expect([runtime.store.replyStatus('off-reply'), runtime.store.replyStatus('ignored-reply')]).toEqual(['sent', 'dropped'])
-  const dropped = ((await api('GET', 'sources')).body as unknown as { dropped: { id: string }[] }[]).flatMap(source => source.dropped)
+  const dropped = droppedReplies(viewsOf(runtime))
   expect(dropped).toMatchObject([{ id: 'ignored-reply', dropped: { reason: 'channelIgnored' } }, { id: 'gone-reply', dropped: { reason: 'channelGone' } }])
 })
 
@@ -1303,7 +1218,7 @@ it('reports a dropped acknowledgement as dropped, with its Ticket on the Source 
   vi.mocked(Commands.prototype.lark).mockRejectedValue(new CliError('the message was withdrawn', 230011))
   expect(await runTool(sessionId, 'orchestrator_ack', { trigger_id: followup.id, text: '收到，也处理这个。' })).toMatchObject({ acknowledgement: 'dropped' })
   expect(await runTool(runtime.masterId, 'orchestrator_read', { resource: `trigger/${followup.id}` })).toMatchObject({ acknowledgement: 'dropped' })
-  const dropped = ((await api('GET', 'sources')).body as unknown as { dropped: unknown[] }[]).flatMap(source => source.dropped)
+  const dropped = droppedReplies(viewsOf(runtime))
   expect(dropped).toMatchObject([{ id: key('ack', followup.id), ticket: { id: ticket.id, title: ticket.title } }])
   expect(overviewOf(runtime).flow.dropped).toBe(1)
 })
@@ -1332,25 +1247,6 @@ it('refuses a settings save with an unknown model or a Source kind that is not i
     baseRevision: runtime.prompts.current().revision })).toMatchObject({ status: 400, body: { code: 'unknownPromptPart' } })
   expect(await request('GET', 'prompts?revision=99')).toMatchObject({ status: 404, body: { code: 'unknownPromptRevision' } })
   expect(await request('GET', 'threads/%E0%A4%A')).toEqual({ status: 400, body: { error: 'A path segment has a malformed escape' } })
-})
-
-it('records a report, the PR it binds and its relay together, or none of them', async () => {
-  const { ticket, sessionId } = await acceptedTicket()
-  deliveries.mockClear()
-  const before = runtime.store.tickets.get(ticket.id)!
-  // A report the Engine refuses binds no PR, though the PR itself could be bound.
-  await expect(runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done', pr_number: 42, human_action: 'Ship it?' })).rejects.toThrow()
-  // A PR the pull request rules refuse records no report.
-  vi.mocked(Commands.prototype.gh).mockImplementation(async args => args[1]?.includes('/pulls/')
-    ? { state: 'open', user: { login: 'someone' }, html_url: 'https://github.com/acme/widgets/pull/7', head: { ref: 'feature/other', sha: 'h', repo: { full_name: 'acme/widgets' } } }
-    : { default_branch: 'master', permissions: { push: true } })
-  await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 7, human_action: 'Desktop too?' })).rejects.toThrow()
-  const after = runtime.store.tickets.get(ticket.id)!
-  expect(after).not.toHaveProperty('follows')
-  expect(after).not.toHaveProperty('attention')
-  expect(after.assignments).toEqual(before.assignments)
-  await runtime.idle()
-  expect(relays(runtime.masterId)).toEqual([])
 })
 
 it('tells the main Session of each requeue of the same Trigger', async () => {
@@ -1425,29 +1321,6 @@ it('releases the database and the state directory lock when it fails to start, s
   runtime = new Runtime(context(), testMachine({ stateDir: directory }), vi.fn())
   await runtime.ready
   expect(runtime.store.get(KV.store.schema)).toBe(SCHEMA_VERSION)
-})
-
-it('tells the conversation that the PR merged when work a restart recovered ends with it later', async () => {
-  const { ticket, sessionId } = await acceptedTicket()
-  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42 })
-  // The host restarted with the worker mid-work: its Assignment starts again with a recovery note.
-  const before = runtime.store.tickets.get(ticket.id)!
-  runtime.engine.assignmentInterrupted(ticket.id, runningAssignment(before)!.id)
-  await runtime.idle()
-  expect(runtime.store.tickets.get(ticket.id)!.assignments).toHaveLength(2)
-  // The PR merged before the restart; the recovered work goes on, and nothing is said yet.
-  const merged = { number: 42, state: 'closed', merged: true, merged_at: before.assignments[0]!.createdAt, html_url: 'https://github.com/acme/widgets/pull/42',
-    user: { login: 'agent-bot' }, head: { sha: 'abc', ref: 'agent/x', repo: { full_name: 'acme/widgets' } } }
-  await observePull(runtime.context(githubKind), merged)
-  expect(runtime.store.tickets.get(ticket.id)).not.toHaveProperty('ended')
-  const id = key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged')
-  expect(runtime.store.replyStatus(id)).toBeUndefined()
-  // Its ready report ends the ticket with the PR, and the conversation hears of the merge once.
-  await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Recovered and verified' })
-  expect(runtime.store.tickets.get(ticket.id)!.ended).toMatchObject({ outcome: 'merged' })
-  expect(runtime.store.replyStatus(id)).toBeDefined()
-  // The report that ended the ticket was the worker's own: its turn is not cancelled inside that tool call.
-  expect(agents.get(sessionId)!.cancel).not.toHaveBeenCalled()
 })
 
 it('restarts a worker that was mid-work when the host stopped with the recovery note, and records no end of its turn', async () => {
@@ -1536,7 +1409,7 @@ it('refuses the main Session a bash command that runs sleep and a long job wait,
   const { sessionId } = await acceptedTicket()
   expect(guards.get(sessionId)!(bash('sleep 60'))).toBeUndefined()
   // The main Session's role says so.
-  expect(masterPrompt).toContain('Worker reports, follow_up notices, new candidates and a background job\'s end, with its output, arrive by themselves as messages')
+  expect(masterPrompt).toContain('Worker reports, attention requests and a background job\'s end with its output arrive by themselves as messages')
 })
 
 it('reads the main Session\'s preset from a registry with or without presetForSession, and takes standard\'s caps when it cannot', async () => {
@@ -1775,38 +1648,29 @@ it('gives the Assignment a restart starts the messages the replaced one had deli
   expect(sent()).toBe(2)
 })
 
-it('ends the main Session\'s prompt with its Policy section, each rule on one line, and says orchestrator_eval holds no rules', async () => {
+it('ends the main Session\'s prompt with the execution environment and holds no remote Policy section', async () => {
   const settings = runtime.store.settings()
   const rules = settings.policy.rules.map(rule => rule.id === 'copy'
     ? { ...rule, name: 'Copy\nfixes', instruction: 'Fix typos.\n- Keep the tone.\n\n## Not a heading' } : rule)
   await runtime.settings.save('policy', { ...settings.policy, rules }, runtime.store.blockRevision('policy'), 'panel')
   const prompt = (sections.get(runtime.masterId)!.text as (context: object) => string)({})
-  const policy = prompt.slice(prompt.indexOf('## Policy'))
-  // Nothing follows the section, whose lines after its head are exactly the enabled rules.
-  expect(policy.trimEnd().split('\n').slice(2)).toEqual(runtime.store.settings().policy.rules.filter(rule => rule.enabled)
-    .map(rule => rule.id === 'copy' ? '- Copy fixes (copy): Fix typos. - Keep the tone. ## Not a heading' : `- ${rule.name} (${rule.id}): ${rule.instruction}`))
-  expect(prompt.indexOf('## Policy')).toBeGreaterThan(prompt.indexOf('Execution environment'))
-  expect((tools.get(runtime.masterId)!.get('orchestrator_eval') as unknown as { description: string }).description).not.toMatch(/rules/)
+  expect(prompt).not.toContain('## Policy')
+  expect(prompt).not.toContain('No rule is enabled')
+  expect(prompt.indexOf('Execution environment')).toBeGreaterThan(prompt.indexOf('## dispatch'))
+  const environment = runtime.prompts.preview(runtime.prompts.current().config).parts.orchestrator.at(-1)!
+  expect(environment.name).toBe('runtime/environment')
+  expect(prompt.trimEnd().endsWith(environment.text)).toBe(true)
 })
 
-it('keeps the Policy the main Session judges by in its prompt, after admission and the rest, as the latest save left it', async () => {
+it('does not assemble proactive rules or admission text as settings change', async () => {
   const prompt = () => (sections.get(runtime.masterId)!.text as (context: object) => string)({})
-  const policy = () => { const text = prompt(), at = text.indexOf('## Policy'); return text.slice(at, text.indexOf('\n\n', at)) }
   const settings = runtime.store.settings()
-  const line = (rule: { id: string; name: string; instruction: string }) => `- ${rule.name} (${rule.id}): ${rule.instruction}`
-  expect(prompt().indexOf('## Policy')).toBeGreaterThan(prompt().indexOf('Assess proactive candidates yourself'))
-  expect(policy().split('\n').filter(item => item.startsWith('- '))).toEqual(settings.policy.rules.filter(rule => rule.enabled).map(line))
-  expect(policy()).toContain(`Policy version ${policyVersion(settings)}; accept mode ${settings.eval.mode}.`)
-  // The rules govern proactive candidates only; read beside an explicit request, they must not be taken to refuse it.
-  expect(policy()).toContain('The accept mode and the rules decide proactive candidates only: an explicit request is routed as dispatch says, in any mode and whatever the rules.')
-  // A save changes it from the next request: one rule disabled, the other's instruction changed.
   const rules = settings.policy.rules.map(rule => rule.id === 'copy' ? { ...rule, instruction: `${rule.instruction} Keep it short.` } : { ...rule, enabled: false })
   await runtime.settings.save('policy', { ...settings.policy, rules }, runtime.store.blockRevision('policy'), 'panel')
-  const saved = runtime.store.settings()
-  expect(policy()).toContain(`Policy version ${policyVersion(saved)}`)
-  expect(policy().split('\n').filter(item => item.startsWith('- '))).toEqual(rules.filter(rule => rule.enabled).map(line))
-  // With no rule enabled, a proactive candidate can only be ignored.
-  await runtime.settings.save('policy', { ...saved.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
-  expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
-  expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
+  expect(prompt()).not.toContain('## Policy')
+  const none = runtime.store.settings()
+  await runtime.settings.save('policy', { ...none.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
+  expect(prompt()).not.toContain('No rule is enabled')
+  expect(prompt()).not.toContain('The accept mode and the rules decide proactive candidates only')
+  expect(prompt()).not.toContain('Assess proactive candidates yourself')
 })

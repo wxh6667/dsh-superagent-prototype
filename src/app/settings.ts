@@ -119,7 +119,7 @@ export class Settings {
       executor: { revision: revision('executor'), value: settings.executor },
       policy: { revision: revision('policy'), rules: rules.map(rule => ({ id: rule.id, name: rule.name, enabled: rule.enabled })),
         allowed: Object.fromEntries(Object.entries(parts).map(([id, part]) => [id, part.allowed.length])), read: 'settings/policy' },
-      sources: sources.instances(settings).map(({ id, kind, enabled, installed }) =>
+      sources: sources.instances(settings).filter(instance => instance.kind === 'local').map(({ id, kind, enabled, installed }) =>
         ({ id, kind, enabled, installed, revision: revision(`source:${id}`), read: `settings/source:${id}` })) }
   }
   /**

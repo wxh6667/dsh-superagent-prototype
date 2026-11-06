@@ -4,7 +4,7 @@
   "license": "MIT",
   "version": "0.1.0",
   "private": true,
-  "description": "A proactive agent for one GitHub repository, as a DSH (DeepSeek Harness) bundle: it listens to GitHub and optionally Feishu, evaluates requests under a Policy, turns authorized ones into Tickets, and executes each in its own DSH Session.",
+  "description": "A local-only DSH (DeepSeek Harness) swarm bundle: a swarm launcher starts one master Session per mission, dispatches one worker Session per task, and coordinates the work through Trellis tasks and isolated git worktrees, with no GitHub or Feishu source.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -14,8 +14,6 @@
       "default": "./lib/index.js"
     },
     "./client": "./lib/client.js",
-    "./github-watch": "./lib/github-watch.js",
-    "./feishu-watch": "./lib/feishu-watch.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },

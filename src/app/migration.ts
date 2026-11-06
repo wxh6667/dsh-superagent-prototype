@@ -1,15 +1,15 @@
 /**
- * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates a schema 10 database through schema 12 in a single transaction so runtime readers never convert legacy shapes.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
 import { z } from 'zod'
-import { isoTime, said, type AcceptMode, type AdmissionCell, type ChannelRef, type Decision, type Execution, type Follow, type MandateBasis,
-  type Reason, type Thread, type Ticket, type TicketInput, type TriggerDisposition } from '../core/index.ts'
+import { LEGACY_SWARM_ID, isoTime, said, type AcceptMode, type AdmissionCell, type ChannelRef, type Decision, type Execution, type Follow,
+  type MandateBasis, type Reason, type Thread, type Ticket, type TicketInput, type TriggerDisposition } from '../core/index.ts'
 import { feishuChatLink } from '../sources/feishu-channel.ts'
 import { POLL_HORIZON_MS } from '../sources/poll.ts'
 import { SettingsSchema, policyVersion, type SettingsOrigin } from '../policy.ts'
-import { autoMergeThreshold, teamDefaults } from './context.ts'
+import { teamDefaults } from './context.ts'
 import { PromptConfigSchema, type PromptConfig, type PromptVersion } from './prompts.ts'
 import type { EffectKind, EffectPayloads } from './effects.ts'
 import { promptsNotice, settingsNotice, subscriptionNotice } from './notices.ts'
@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -88,6 +88,27 @@ export function migrateTo11(store: Store): void {
   }
   step('the reasons', () => { reasonsAsCodes(store) })
   step('the Triggers\' times', () => { triggerTimes(store) })
+}
+/**
+ * Introduce swarm ownership: a database holding historical tickets gets one completed `legacy` swarm, and every ticket
+ * without a `swarmId` is assigned to it. A database without tickets gets no legacy swarm, and reopening a migrated
+ * database neither duplicates the swarm nor rewrites tickets that already have an owner.
+ */
+export function migrateTo12(store: Store): void {
+  const rows = store.db.prepare('SELECT id, value FROM ticket').all()
+  if (!rows.length) return
+  if (!store.swarms.get(LEGACY_SWARM_ID)) {
+    step('the legacy swarm', () => {
+      const at = new Date().toISOString()
+      store.swarms.save({ id: LEGACY_SWARM_ID, title: 'Legacy work', mission: 'Historical tickets kept read-only.', workspace: '', verify: '', prepare: '',
+        budget: { maxTasks: 0, maxWorkers: 0, maxRounds: 0 }, status: 'completed', masterSessionId: '', createdAt: at, completedAt: at, legacy: true })
+    })
+  }
+  for (const row of rows) {
+    const ticket = JSON.parse(String(row.value)) as Ticket
+    if (ticket.swarmId) continue
+    step(`ticket ${String(row.id)}`, () => { store.tickets.save({ ...ticket, swarmId: LEGACY_SWARM_ID }) })
+  }
 }
 /**
  * Normalize trigger and thread timestamps to fixed-width millisecond ISO strings so lexicographical text order matches
@@ -282,21 +303,20 @@ function legacyText(value: string): string {
 }
 /**
  * Upgrade a stored prompt configuration to current sections, tool names, and skill references; legacy configurations take
- * built-in team sections, keep custom guides as skills, and carry any auto-merge line threshold into `delivery`.
+ * the built-in local team sections and keep custom guides as skills. Remote auto-merge and cross-Source identity settings are
+ * dropped rather than written into a prompt.
  */
 function normalize(config: unknown): PromptConfig {
   const legacy = LegacyPromptConfigSchema.safeParse(config)
-  const limit = legacy.success ? /fewer than (\d+) lines \(additions plus deletions\)/.exec(legacy.data.guides.work ?? '')?.[1] : undefined
-  const current = legacy.success ? { ...teamDefaults, delivery: limit ? teamDefaults.delivery.replace(autoMergeThreshold(200), autoMergeThreshold(Number(limit))) : teamDefaults.delivery,
+  const current = legacy.success ? { ...teamDefaults,
     skills: Object.fromEntries(Object.entries(legacy.data.guides).filter(([name]) => !LEGACY_FIXED.has(name)).map(([name, body]) => [name, legacyText(body)])) }
     : PromptConfigSchema.parse(config)
   return { communication: currentNames(current.communication), scope: currentNames(current.scope), delivery: currentNames(current.delivery),
     skills: Object.fromEntries(Object.entries(current.skills).map(([name, body]) => [name, currentNames(body)])) }
 }
 /**
- * Normalize stored prompt revisions to current sections and names (recording original configs under `legacy` when saved
- * before team sections existed or unparseable) and synthesize a new revision for removed settings fields (auto-merge
- * threshold and cross-source member identities) unless an earlier migration already created it.
+ * Normalize stored prompt revisions to current sections and names, recording original configs under `legacy` when saved before
+ * team sections existed or unparseable. Removed remote auto-merge and cross-Source identity settings are dropped, not migrated.
  */
 function migratePrompts(store: Store): void {
   // Preserve original configs on legacy or unparseable revisions, falling back to the last readable config so sessions always have valid prompts.
@@ -310,24 +330,6 @@ function migratePrompts(store: Store): void {
     store.set(`prompt-version:${version.revision}`, { ...version, config, ...kept })
     readable = config
   }
-  if (store.get('prompt-settings-text') === 1) return
-  const before = store.get<unknown>('settings-before-9')
-  const policy = (isObject(before) ? before.policy : undefined) as { autoMergeLineLimit?: unknown; members?: unknown } | undefined
-  const limit = typeof policy?.autoMergeLineLimit === 'number' ? policy.autoMergeLineLimit : 200
-  const mapped = ((Array.isArray(policy?.members) ? policy.members : []) as Member[]).filter(person => person.feishuId && person.github)
-  const revision = store.get<number>('prompt-revision')
-  const current = revision === undefined ? undefined : store.get<PromptVersion>(`prompt-version:${revision}`)
-  const config = current?.config ?? { ...teamDefaults, skills: {} }
-  const delivery = config.delivery.includes(autoMergeThreshold(200)) ? config.delivery.replace(autoMergeThreshold(200), autoMergeThreshold(limit))
-    : limit === 200 ? config.delivery : `${config.delivery}\nEnable auto-merge only on a PR that changes fewer than ${limit} lines (additions plus deletions).`
-  const identities = mapped.length && !config.skills.identities ? { identities: ['The same colleague may use a different account on each Source. When you mention, assign or request a review from someone you met on another Source, use their account on this one:',
-    ...mapped.map(person => `- ${person.name ?? person.feishuId} (Feishu ${person.feishuId}) is @${person.github} on GitHub`)].join('\n') } : {}
-  const next = { ...config, delivery, skills: { ...config.skills, ...identities } }
-  if (JSON.stringify(next) === JSON.stringify(config)) return
-  const previous = current?.revision ?? 0
-  if (!current) store.set('prompt-version:0', { revision: 0, previousRevision: null, savedAt: '', source: 'defaults', config })
-  store.set(`prompt-version:${previous + 1}`, { revision: previous + 1, previousRevision: previous, savedAt: new Date().toISOString(), source: 'settings-migration', config: next })
-  store.set('prompt-revision', previous + 1)
 }
 
 const CELLS: readonly string[] = ['listedUnaddressed', 'unlistedAddressed', 'unlistedUnaddressed']
