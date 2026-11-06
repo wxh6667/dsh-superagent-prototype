@@ -1,134 +1,93 @@
-import { execFile } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, LocalRepoSchema, SETUP_FIELDS, machineOf, resolveDeployment, resolveLocalRepository } from '../src/deployment.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsSchema } from '../src/policy.ts'
-import { gitEnv } from './fixtures/git.ts'
+import { workerBin, workerGitConfig } from '../src/infra/environment.ts'
+import { testMachine } from './fixtures/deployment.ts'
 
-const exec = promisify(execFile)
 let dir: string
-let path: string
-const program = (file: string, body = ''): string => { writeFileSync(file, `#!/bin/sh\n${body}\n`); chmodSync(file, 0o755); return file }
-/** Fake gh CLI signed in as `login` with configurable push access to acme/widgets (including its former name acme/gadgets). */
-const gh = (file: string, login: string, push = true): string => program(file, `case "$*" in\n  "api user") echo '{"login":"${login}","id":7}' ;;\n  "api repos/acme/"*" --jq {name: .full_name, push: .permissions.push}") echo '{"name":"acme/widgets","push":${push}}' ;;\n  *) exit 1 ;;\nesac`)
-/** Fake lark-cli script body returning canned auth, strict-mode, and bot info responses. */
-const lark = (status: object, mode = 'bot', bot: object = { bot: { open_id: 'ou_bot', app_name: 'Widgets Bot' }, code: 0 }): string =>
-  `case "$*" in\n  "auth status") echo '${JSON.stringify(status)}' ;;\n  "config strict-mode") echo 'strict-mode: ${mode} (source: profile)' ;;\n  "api GET /open-apis/bot/v3/info --as bot --format ndjson") echo '${JSON.stringify(bot)}' ;;\nesac`
-const minimal = (overrides: Record<string, unknown> = {}) => ({ stateDir: join(dir, 'state'), ...overrides })
-const machine = (overrides: Partial<Machine> = {}): Machine => ({ ...machineOf(Config(minimal())), ...overrides })
-/** Runs commands like worker shells do, but locally: the stand-ins first on PATH, then the system's git. */
-const probe: Probe = async argv => (await exec(argv[0]!, argv.slice(1), { env: { PATH: path, HOME: dir } })).stdout
-const setupError = (place: string, code: string, values: Record<string, unknown> = {}) => expect.objectContaining({ place, code, values: expect.objectContaining(values) })
-
-beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'deployment-'))
-  mkdirSync(join(dir, 'bin')); mkdirSync(join(dir, 'state', 'worker-bin'), { recursive: true }); mkdirSync(join(dir, 'widgets', 'src'), { recursive: true })
-  path = [join(dir, 'state-link', 'worker-bin'), `${join(dir, 'state', 'worker-bin')}/`, join(dir, 'bin'), '/usr/bin', '/bin'].join(':')
-  gh(join(dir, 'bin', 'gh'), 'Agent-Bot')
-  program(join(dir, 'bin', 'lark-cli'), lark({ appId: 'cli_bot', brand: 'lark', identities: { bot: { status: 'ready' } } }))
-  // Stale worker shims with the same binary name must be skipped regardless of PATH normalization or symlinks.
-  program(join(dir, 'state', 'worker-bin', 'gh'))
-  symlinkSync(join(dir, 'state'), join(dir, 'state-link'))
-  await exec('git', ['init', '-q', join(dir, 'widgets')], { env: gitEnv() })
-  await exec('git', ['-C', join(dir, 'widgets'), 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git'], { env: gitEnv() })
-})
-afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
-
-// Setup spawns CLI subprocesses that can take several seconds when tests run in parallel.
-vi.setConfig({ testTimeout: 30_000 })
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'orchestrator-deployment-')) })
+afterEach(() => rmSync(dir, { recursive: true, force: true }))
+const machine = () => testMachine({ stateDir: join(dir, 'state') })
+const repo = () => {
+  const path = join(dir, 'repo')
+  mkdirSync(join(path, '.trellis'), { recursive: true })
+  mkdirSync(join(path, '.git'), { recursive: true })
+  return path
+}
+const refusal = (work: () => unknown): { code?: string; place?: string } | undefined => {
+  try { work(); return undefined } catch (error) { return error as { code?: string; place?: string } }
+}
 
 describe('configuration schema', () => {
   it('requires only the state directory and reads the editable fields through references', () => {
     expect(() => Config({})).toThrow('stateDir')
     const read = machineOf(Config({ stateDir: join(dir, 'state') }))
-    // Limits are volatile references that the loader updates in place and callers read when used.
     expect({ ...read, promptMaxChars: read.promptMaxChars.get(), admissionContextMaxPages: read.admissionContextMaxPages.get(),
       admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
       .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000, managementOrigins: [] })
-    expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
-    expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+    expect(() => Config({ stateDir: 'relative/dir' })).toThrow()
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
-    const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })
-    expect(() => machineOf(Config(raw))).toThrow('keys it does not use: repository (now on the GitHub Source), repositoryPath (now in the prepare command of the Execution settings), blockedCommands (now in the Execution settings), author (now prompt text), extra;')
+    expect(() => machineOf(Config({ stateDir: join(dir, 'state'), repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 } as never)))
+      .toThrow('keys it does not use: repositoryPath (now in the prepare command of the Execution settings), blockedCommands (now in the Execution settings), author (now prompt text), extra;')
+  })
+})
+
+describe('local repository', () => {
+  it('accepts an absolute git repository with a .trellis directory and keeps its settings', () => {
+    const path = repo()
+    expect(resolveLocalRepository({ repository: path, baseBranch: 'dev', verify: 'check.sh', actor: 'me', actorName: 'Me' }))
+      .toEqual({ repository: path, baseBranch: 'dev', verify: 'check.sh', actor: 'me', actorName: 'Me' })
+    expect(resolveLocalRepository({})).toBeUndefined()
+  })
+  it('names each unusable path', () => {
+    expect(refusal(() => resolveLocalRepository({ repository: 'relative/repo' }))?.code).toBe('localRepositoryInvalid')
+    expect(refusal(() => resolveLocalRepository({ repository: join(dir, 'missing') }))?.code).toBe('localRepositoryMissing')
+    const file = join(dir, 'file'); writeFileSync(file, '')
+    expect(refusal(() => resolveLocalRepository({ repository: file }))?.code).toBe('localRepositoryInvalid')
+    const plain = join(dir, 'plain'); mkdirSync(plain)
+    expect(refusal(() => resolveLocalRepository({ repository: plain }))?.code).toBe('localRepositoryNotGit')
+    mkdirSync(join(plain, '.git'))
+    expect(refusal(() => resolveLocalRepository({ repository: plain }))?.code).toBe('localRepositoryNoTrellis')
+  })
+  it('requires a local repository and derives the deployment from it', () => {
+    expect(refusal(() => resolveDeployment(machine(), undefined))).toMatchObject({ code: 'localRepositoryUnset', place: 'local' })
+    const path = repo()
+    expect(resolveDeployment(machine(), { repository: path })).toMatchObject({ local: { repository: path, baseBranch: 'main', verify: 'scripts/verify.sh' } })
+    expect(SETUP_FIELDS.local).toEqual(Object.keys(LocalRepoSchema.shape))
   })
 })
 
 describe('setup', () => {
-  it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
-    const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
-    expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
-    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
-    expect(deployment).not.toHaveProperty('feishu')
-    // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
-    expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
-  })
-  it('names what setup needs and where it is set', async () => {
-    const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
-      expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
-    const repository = 'acme/widgets'
-    await needs('github', 'repositoryUnset', {}, { cli: 'gh' })
-    await needs('github', 'agentCliUnset', {}, { repository })
-    await needs('github', 'agentCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { repository, cli: join(dir, 'missing') })
-    await needs('github', 'agentCliMissing', { output: 'bin/gh must be a command name or an absolute path' }, { repository, cli: 'bin/gh' })
-    await needs('github', 'agentCliSignedOut', {}, { repository, cli: program(join(dir, 'bin', 'gh-broken'), 'exit 1') })
-    await needs('github', 'repositoryReadOnly', { account: 'Agent-Bot', repository: 'acme/widgets' }, { repository, cli: gh(join(dir, 'bin', 'gh-reader'), 'Agent-Bot', false) })
-    // Signed in, but the account cannot read the repository, or the CLI names no account.
-    const unreadable = program(join(dir, 'bin', 'gh-outsider'),
-      `case "$*" in\n  "api user") echo '{"login":"Agent-Bot","id":7}' ;;\n  *) echo 'HTTP 404' >&2; exit 1 ;;\nesac`)
-    const output = expect.stringContaining('HTTP 404') as unknown
-    await needs('github', 'repositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output }, { repository, cli: unreadable })
-    await needs('github', 'agentCliNoAccount', {}, { repository, cli: program(join(dir, 'bin', 'gh-anonymous'), `echo '{}'`) })
-    expect(() => executable('nothing-here', join(dir, 'bin'))).toThrow('nothing-here is not an executable file on PATH')
-  })
-  it('resolves a local-only deployment without a GitHub account', async () => {
-    mkdirSync(join(dir, 'widgets', '.trellis'), { recursive: true })
-    const local = await resolveDeployment(machine(), undefined, probe, path, { repository: join(dir, 'widgets') })
-    expect(local).toMatchObject({ repository: '', local: { repository: join(dir, 'widgets'), baseBranch: 'main', verify: 'scripts/verify.sh',
-      actor: 'local-user', actorName: 'Local user' } })
-    expect(local).not.toHaveProperty('github')
-    mkdirSync(join(dir, 'plain'))
-    await exec('git', ['init', '-q', join(dir, 'plain')], { env: gitEnv() })
-    await expect(resolveDeployment(machine(), undefined, probe, path, { repository: join(dir, 'plain') }))
-      .rejects.toMatchObject({ code: 'localRepositoryNoTrellis', place: 'local' })
-    await expect(resolveDeployment(machine(), undefined, probe, path, { repository: join(dir, 'missing') }))
-      .rejects.toMatchObject({ code: 'localRepositoryMissing', place: 'local' })
-    await expect(resolveDeployment(machine(), undefined, probe, path, { repository: 'relative/repo' }))
-      .rejects.toMatchObject({ code: 'localRepositoryInvalid', place: 'local' })
-  })
-  it('starts a local-only deployment without GitHub and requires the local actor in the policy', async () => {
-    const repo = join(dir, 'local-repo'); mkdirSync(repo)
-    await exec('git', ['init', '-q', repo], { env: gitEnv() })
-    mkdirSync(join(repo, '.trellis'))
+  it('resolves the local repository, writes the worker environment and records a refused actor', async () => {
+    const path = repo()
     const settings = (allowed: boolean) => SettingsSchema.parse({
-      sources: { github: { enabled: false, config: {} }, local: { enabled: true, config: { repository: repo } } },
+      sources: { local: { enabled: true, config: { repository: path } } },
       policy: { sources: { local: { allowed: allowed ? [{ id: 'local-user' }] : [] } } },
     })
-    const setup = new Setup({ context: { logger: { warn: vi.fn() } } as never, machine: { ...machine(), stateDir: join(dir, 'local-state') },
-      lifetime: new AbortController().signal, restart: vi.fn() })
+    const setup = new Setup({ machine: machine(), restart: vi.fn() })
     expect(await setup.run(settings(false))).toBe(false)
     expect(setup.problem).toMatchObject({ place: 'local', code: 'localActorNotAllowed' })
     expect(await setup.run(settings(true))).toBe(true)
-    expect(setup.deployment).toMatchObject({ repository: '', local: { repository: repo, baseBranch: 'main' } })
+    expect(setup.deployment.local.repository).toBe(path)
+    expect(readdirSync(workerBin(machine().stateDir))).toEqual([])
+    expect(readdirSync(machine().stateDir)).toContain('worker-gitconfig')
+    expect(readFileSync(workerGitConfig(machine().stateDir), 'utf8')).toContain('[user]')
+    expect(() => setup.check()).toThrow()
     setup.restore()
   })
-  it('reads the Feishu bot from a bot-only lark-cli, or finds none when the Feishu Source names no CLI', async () => {
-    expect(await resolveFeishuBot(machine(), {}, probe, path)).toBeUndefined()
-    expect(await resolveFeishuBot(machine(), { cli: 'lark-cli' }, probe, path)).toEqual({ cli: join(dir, 'bin', 'lark-cli'), appId: 'cli_bot', brand: 'lark', botId: 'ou_bot', name: 'Widgets Bot' })
-    const refuses = async (code: string, values: Record<string, unknown> = {}) => expect(resolveFeishuBot(machine(), { cli: 'lark-cli' }, probe, path)).rejects.toEqual(setupError('feishu', code, values))
-    program(join(dir, 'bin', 'lark-cli'), lark({ identities: { bot: { status: 'ready' } } }))
-    await refuses('feishuNoApp')
-    program(join(dir, 'bin', 'lark-cli'), lark({ appId: 'cli_bot', identities: { bot: { status: 'missing' } } }))
-    await refuses('feishuBotNotReady', { app: 'cli_bot', status: 'missing' })
-    program(join(dir, 'bin', 'lark-cli'), lark({ appId: 'cli_bot', identities: { bot: { status: 'ready' } } }, 'off'))
-    await refuses('feishuUserIdentity', { mode: 'off' })
-    program(join(dir, 'bin', 'lark-cli'), lark({ appId: 'cli_bot', identities: { bot: { status: 'ready' } } }, 'bot', { code: 0, data: {} }))
-    await refuses('feishuNoBot')
-    program(join(dir, 'bin', 'lark-cli'), 'echo "not configured" >&2; exit 1')
-    await refuses('feishuCliFailed', { output: expect.stringContaining('not configured') })
+  it('waits for a local repository and schedules a check again', async () => {
+    const restart = vi.fn()
+    const setup = new Setup({ machine: machine(), restart })
+    const settings = SettingsSchema.parse({ sources: { local: { enabled: true, config: {} } } })
+    expect(await setup.run(settings)).toBe(false)
+    expect(setup.problem).toMatchObject({ place: 'local', code: 'localRepositoryUnset' })
+    setup.check()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(restart).toHaveBeenCalledOnce()
   })
 })

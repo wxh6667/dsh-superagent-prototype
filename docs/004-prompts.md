@@ -13,7 +13,7 @@ A team can edit three team sections, add skills, and override every built-in sys
 | Delivery requirements | The local commit, the verification evidence, before-and-after UI evidence, and the review the main Session performs before committing |
 | Team skills | Knowledge the agents load when they need it, such as a project-specific diagnosis or release procedure |
 
-The built-in text covers the local swarm roles, dispatch, work and handoff rules. It refers to the team sections by their headings instead of repeating them. GitHub/Feishu Source skills and proactive assessment instructions are not part of the assembled prompt.
+The built-in text covers the local swarm roles, dispatch, work and handoff rules. It refers to the team sections by their headings instead of repeating them. Source skills and proactive assessment instructions are not part of the assembled prompt.
 
 ### Built-in parts and templates
 

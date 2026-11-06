@@ -1,15 +1,12 @@
-/** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
-import type { Context } from '@deepseek-ai/cordis'
+/** Probes the local repository, configures the worker execution environment and command shims, and tracks setup readiness. */
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, resolveLocalRepository, workerProbe, type Deployment, type Machine } from '../deployment.ts'
-import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
+import { SETUP_FIELDS, resolveDeployment, resolveLocalRepository, type Deployment, type Machine } from '../deployment.ts'
+import { agentVariables, applyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import { allowedSender, type Settings, type SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 
 export interface SetupHost {
-  readonly context: Context
   readonly machine: Machine
-  readonly lifetime: AbortSignal
   restart(): void
 }
 
@@ -18,13 +15,12 @@ const setupFields = (settings: Settings) =>
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
 
 /**
- * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
- * `Runtime` runs it at startup to gate orchestration readiness, while `Settings` uses it to validate account changes, update blocked command shims, and schedule restarts.
+ * Resolves the local repository, then writes and applies the isolated git and shim environment used by worker processes.
+ * `Runtime` runs it at startup to gate orchestration readiness, while `Settings` uses it to validate local repository changes, update blocked command shims, and schedule restarts.
  */
 export class Setup {
   private resolved?: Deployment
   problem?: SetupProblem
-  feishuProblem?: SetupProblem
   /** PATH with the worker shim directory removed so the host's own CLI calls invoke the real binaries. */
   private readonly path: string
   /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
@@ -41,7 +37,7 @@ export class Setup {
     return this.resolved
   }
   configured(): boolean { return this.resolved !== undefined }
-  /** Resolve deployment accounts and apply the worker environment, recording `SetupError` failures in `problem`/`feishuProblem` and rethrowing unexpected errors. */
+  /** Resolve the local repository and apply the worker environment, recording `SetupError` failures in `problem` and rethrowing unexpected errors. */
   async run(settings: Settings): Promise<boolean> {
     try { this.resolved = await this.resolve(settings); return true }
     catch (error) {
@@ -50,62 +46,35 @@ export class Setup {
       return false
     }
   }
-  /** Trigger a restart to re-run setup, refusing if setup and Feishu are already healthy so running assignments are not interrupted. */
+  /** Trigger a restart to re-run setup, refusing if setup is already healthy so running assignments are not interrupted. */
   check(): void {
-    if (this.configured() && !this.feishuProblem) throw new UserError('setupComplete')
+    if (this.configured()) throw new UserError('setupComplete')
     this.restart()
   }
   /** Defer the restart to the next macrotask so the current HTTP or tool caller receives its response first. */
   restart(): void { setTimeout(this.host.restart, 0) }
-  /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
+  /** Validate the local repository a modified source block names before saving it. */
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
-    const { machine } = this.host
-    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
-      : block === 'source:local' ? Promise.resolve(resolveLocalRepository(settings.sources.local?.config))
-      : resolveDeployment(machine, settings.sources.github?.config, this.probe())
-    await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
+    if (block === 'source:local') resolveLocalRepository(settings.sources.local?.config)
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)
   }
   restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined }
-  /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
-  private probe() {
-    const { context, machine, lifetime } = this.host
-    return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
-  }
   private async resolve(settings: Settings): Promise<Deployment> {
-    const { context, machine, lifetime } = this.host
-    const probe = this.probe()
-    // A local-only deployment does not need a GitHub account. Skip GitHub when its Source is off, or when it is
-    // still at its empty default and the local Source is enabled.
-    const githubConfig = settings.sources.github?.config
-    const localEnabled = settings.sources.local?.enabled === true
-    const githubConfigured = !!(githubConfig?.repository || githubConfig?.cli)
-    const github = settings.sources.github?.enabled !== false && (githubConfigured || !localEnabled) ? githubConfig : undefined
-    const local = localEnabled ? settings.sources.local?.config : undefined
-    const deployment = await resolveDeployment(machine, github, probe, undefined, local)
+    const { machine } = this.host
+    const local = settings.sources.local?.enabled === true ? settings.sources.local?.config : undefined
+    const deployment = resolveDeployment(machine, local)
     // The local Source is usable only when its configured actor is in the Policy's allowed list.
-    if (deployment.local && !allowedSender(settings, { source: 'local', id: deployment.local.actor })) {
+    if (!allowedSender(settings, { source: 'local', id: deployment.local.actor })) {
       throw new SetupError('localActorNotAllowed', { actor: deployment.local.actor })
     }
-    const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
-      if (!(error instanceof SetupError)) throw error
-      this.feishuProblem = error.problem
-      context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
-      return undefined
-    })
-    const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
-    await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
+    await writeEnvironment(deployment, settings.executor.blockedCommands).catch(machineProblem)
     this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
-    await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
-      this.restore()
-      machineProblem(error)
-    })
-    return resolved
+    return deployment
   }
 }

@@ -6,7 +6,7 @@ import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, t
   type ThreadFact, type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo12, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, backupDatabase, migrateTo11, migrateTo12, migrateTo13, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 
@@ -51,9 +51,9 @@ export { SCHEMA_VERSION }
 export class Store implements Repositories {
   readonly db: DatabaseSync
   /**
-   * Opens or creates the SQLite database at `path`, migrating schema 10 through schema 12 in a single transaction.
+   * Opens or creates the SQLite database at `path`, migrating schema 10 through schema 13 in a single transaction.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
-   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (12), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
+   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (13), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
   constructor(path: string, private readonly report: (error: unknown) => void = () => {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -66,6 +66,15 @@ export class Store implements Repositories {
       if (version !== undefined && version > SCHEMA_VERSION) throw new Error(`Unsupported orchestrator database version ${version}`)
       if (version !== undefined && version < OLDEST_SCHEMA) throw new Error(tooOld(version))
       const migrating = version !== undefined && version < SCHEMA_VERSION
+      // Copy the database before any migration step so an operator can restore it; a failed copy refuses the migration.
+      if (version !== undefined && version < 13) {
+        try {
+          this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+          backupDatabase(path)
+        } catch (error) {
+          throw new Error(`The orchestrator database was not migrated: its backup could not be written: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       try {
         this.atomic(() => {
           this.db.exec(`
@@ -89,6 +98,7 @@ export class Store implements Repositories {
           this.addColumns()
           if (version !== undefined && version < 11) migrateTo11(this)
           if (version !== undefined && version < 12) migrateTo12(this)
+          if (version !== undefined && version < 13) migrateTo13(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {

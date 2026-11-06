@@ -1,15 +1,14 @@
-/** Subprocess wrapper for running gh, lark-cli, and git commands under the deployment's configured accounts. */
+/** Subprocess wrapper for running git and other commands under the deployment's isolated environment. */
 import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
-import { z } from 'zod'
 import type { Deployment } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
 /**
- * Error thrown by Commands when a CLI invocation fails, capturing stderr diagnostics, API error codes, and exit status without echoing command arguments.
- * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures.
+ * Error thrown by Commands when a CLI invocation fails, capturing stderr diagnostics and exit status without echoing command arguments.
+ * Callers inspect its exit status to distinguish a missing result from a retryable failure.
  */
 export class CliError extends Error {
   constructor(message: string, readonly code?: number, readonly exitCode?: number) { super(message) }
@@ -25,7 +24,6 @@ export function commandError(error: unknown, program = 'command'): Error {
     catch { /* Non-JSON CLI diagnostics are retained below. */ }
     const code = parsed?.error?.code
     if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
-    // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
     if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
   }
   return new CliError(`${basename(program)} ${ended(error)}`, undefined, exitCode)
@@ -39,22 +37,9 @@ function ended(error: unknown): string {
   if (typeof code === 'number') return `exited with code ${code}`
   return typeof code === 'string' ? `could not run: ${code}` : 'failed'
 }
-export interface Tally { skipped: number }
-/** Parses array elements against a schema, skipping invalid items and incrementing `tally.skipped`. */
-export function validItems<T>(item: z.ZodType<T>, list: readonly unknown[], tally?: Tally): T[] {
-  const items = list.flatMap(value => { const parsed = item.safeParse(value); return parsed.success ? [parsed.data] : [] })
-  if (tally) tally.skipped += list.length - items.length
-  return items
-}
-/** Rewrites Feishu error 232011 (bot not in chat) with remediation instructions. */
-function membership(error: unknown): unknown {
-  if (!(error instanceof CliError) || error.code !== 232011) return error
-  const hint = 'The Feishu bot is not a member of the chat. Add the bot in the chat settings, then retry.'
-  return new CliError(hint, error.code, error.exitCode)
-}
 /**
- * Executes gh, lark-cli, and git subprocesses with deployment account credentials, timeouts, and abort signals.
- * Restricts GitHub API calls to the configured repository and translates CLI failures into CliError instances for Sources, MasterAssessor, Outbox, and Settings.
+ * Executes subprocesses with the deployment's isolated environment, timeouts, and abort signals.
+ * Translates CLI failures into CliError instances for Sources, MasterAssessor, and the Outbox.
  */
 export class Commands {
   /**
@@ -63,61 +48,14 @@ export class Commands {
    */
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
   get deployment(): Deployment { return this.resolved() }
-  get repository(): string {
-    if (!this.deployment.repository) throw new Error('No GitHub repository is configured')
-    return this.deployment.repository
-  }
-  private get githubCli(): string {
-    const cli = this.deployment.github?.cli
-    if (!cli) throw new Error('No GitHub account is configured')
-    return cli
-  }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...this.environment } })
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
-  /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.githubCli, args)) as T }
-  /**
-   * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
-   * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
-   * @throws CliError with GitHub's HTTP status as `code` on failure.
-   */
-  async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
-  async api(path: string, ...flags: string[]): Promise<string>
-  async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.githubCli, ['api', this.path(schema), ...rest])
-    const [path = '', ...flags] = rest
-    return schema.parse(await this.gh(['api', this.path(path), ...flags]))
-  }
-  /** Fetches all pages of a GitHub API list within the configured repository, skipping items that fail schema validation. */
-  async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
-    const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
-    return validItems(item, pages.flat(), tally)
-  }
-  private path(path: string): string {
-    const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
-    if (outside) throw new Error('GitHub calls are restricted to the configured repository')
-    return path ? `repos/${this.repository}/${path}` : `repos/${this.repository}`
-  }
-  /**
-   * Runs the Feishu bot's `lark-cli` and returns the JSON `data` payload.
-   * @throws CliError with Feishu's error code on failure (rewriting 232011 when the bot is not in the chat).
-   */
-  async lark<T>(args: string[], cwd?: string): Promise<T> {
-    const bot = this.deployment.feishu
-    if (!bot) throw new Error('The Feishu Source has no working bot CLI')
-    const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json'], cwd)
-      .catch((error: unknown) => { throw membership(error) })
-    const result = JSON.parse(output) as { ok: boolean; data: T; error?: { code?: number; message?: string } }
-    const code = result.error?.code
-    if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
-    return result.data
-  }
-  /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
+  /** Runs `git` on PATH using the agent's isolated git environment. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
 }

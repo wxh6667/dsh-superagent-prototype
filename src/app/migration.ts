@@ -1,23 +1,22 @@
 /**
- * Migrates a schema 10 database through schema 12 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates a schema 10 database through schema 13 in a single transaction so runtime readers never convert legacy shapes.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
-import { basename } from 'node:path'
+import { constants, copyFileSync, mkdirSync } from 'node:fs'
+import { basename, dirname, extname, join } from 'node:path'
 import { z } from 'zod'
 import { LEGACY_SWARM_ID, isoTime, said, type AcceptMode, type AdmissionCell, type ChannelRef, type Decision, type Execution, type Follow,
   type MandateBasis, type Reason, type Thread, type Ticket, type TicketInput, type TriggerDisposition } from '../core/index.ts'
-import { feishuChatLink } from '../sources/feishu-channel.ts'
-import { POLL_HORIZON_MS } from '../sources/poll.ts'
-import { SettingsSchema, policyVersion, type SettingsOrigin } from '../policy.ts'
+import { SettingsSchema, policyVersion, type Settings, type SettingsOrigin } from '../policy.ts'
 import { teamDefaults } from './context.ts'
 import { PromptConfigSchema, type PromptConfig, type PromptVersion } from './prompts.ts'
 import type { EffectKind, EffectPayloads } from './effects.ts'
-import { promptsNotice, settingsNotice, subscriptionNotice } from './notices.ts'
+import { promptsNotice, settingsNotice, type Notice } from './notices.ts'
 import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 13
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -27,6 +26,20 @@ export const tooOld = (version: number): string =>
 type Stored = Record<string, unknown>
 const isObject = (value: unknown): value is Stored => !!value && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): string | undefined => typeof value === 'string' && value ? value : undefined
+
+/** KV records and link formats of the Sources this build removed, read only while migrating databases that predate schema 13. */
+const LEGACY = {
+  githubRetries: 'github-retry',
+  githubCursor: (number: number) => `github-cursor:${number}`,
+  feishuChats: 'feishu-chats',
+  feishuHistory: (chat: string) => `feishu-history:${chat}`,
+  feishuTopics: 'feishu-history-threads:',
+}
+const POLL_HORIZON_MS = 14 * 24 * 3600_000
+const feishuChatLink = (brand: 'feishu' | 'lark', chatId: string): string =>
+  `https://applink.${brand === 'lark' ? 'larksuite.com' : 'feishu.cn'}/client/chat/open?openChatId=${encodeURIComponent(chatId)}`
+const subscriptionNotice = (thread: string): Notice => [`subscription:${thread}`,
+  { subscription_changes: [{ thread, removed: true }] }, `Removed the subscriptions on thread ${thread}`]
 
 /** Runs one migration step, prefixing any thrown error with the name of the record that failed. */
 function step<T>(record: string, work: () => T): T {
@@ -530,19 +543,19 @@ function migrateSourceRecords(store: Store): void {
 }
 /** Convert legacy Feishu topic ID arrays into maps keyed by topic ID with the chat's last recovery timestamp. */
 function feishuTopics(store: Store): void {
-  for (const name of store.keys(KV.feishu.topics)) {
+  for (const name of store.keys(LEGACY.feishuTopics)) {
     const topics: unknown = store.get(name)
     if (!Array.isArray(topics)) continue
-    const seen = store.get(KV.feishu.history(name.slice(KV.feishu.topics.prefix.length))) ?? new Date().toISOString()
+    const seen = store.get(LEGACY.feishuHistory(name.slice(LEGACY.feishuTopics.length))) ?? new Date().toISOString()
     store.set(name, Object.fromEntries(topics.map(id => [String(id), seen])))
   }
 }
 /**
- * Backfill `direct: 'true'` onto Feishu channel addresses from `KV.feishu.chats`, because Feishu `oc_` chat IDs do not
+ * Backfill `direct: 'true'` onto Feishu channel addresses from `LEGACY.feishuChats`, because Feishu `oc_` chat IDs do not
  * distinguish direct messages from group chats on their own.
  */
 function feishuDirectAddresses(store: Store): void {
-  const chats = store.get(KV.feishu.chats) ?? {}
+  const chats = store.get<Record<string, boolean>>(LEGACY.feishuChats) ?? {}
   const direct = (channel: unknown): channel is ChannelRef => isObject(channel) && channel.source === 'feishu' && isObject(channel.address)
     && chats[String(channel.address.chatId)] === true && channel.address.direct === undefined
   const marked = (channel: ChannelRef): ChannelRef => direct(channel)
@@ -577,13 +590,14 @@ function feishuThreadLinks(store: Store): void {
 function issueSourceRecords(store: Store): void {
   store.db.exec(`UPDATE trigger SET value = json_set(value, '$.source', 'github') WHERE value ->> '$.source' = 'github-issue'`)
   const pending = store.get('github-issue-pending' as Key<Record<string, { number: number; at: string }>>) ?? {}
-  const retries = { ...store.get(KV.github.retries) }
+  type LegacyRetry = { since: string; pr: boolean; failedAt?: string; attempts?: number }
+  const retries = { ...store.get<Record<string, LegacyRetry>>(LEGACY.githubRetries) }
   for (const { number, at } of Object.values(pending)) {
     if (!(Date.now() - Date.parse(at) < POLL_HORIZON_MS)) continue
     const retry = retries[number]
     retries[number] = { ...retry, since: retry && retry.since < at ? retry.since : at, pr: retry?.pr ?? false }
   }
-  if (Object.keys(retries).length) store.set(KV.github.retries, retries)
+  if (Object.keys(retries).length) store.set(LEGACY.githubRetries, retries)
   const kept = ['github-issue-pending', 'github-issues-since', 'github-issues-started-at', ...store.keys('github-issue-eligibility:')]
   for (const name of kept) store.delete(name)
 }
@@ -591,7 +605,7 @@ function issueSourceRecords(store: Store): void {
 function githubCursors(store: Store): void {
   for (const name of [...store.keys('github-thread:'), ...store.keys('thread-since:github:')]) {
     const at = store.get<string>(name as Key<string>)
-    const cursor = KV.github.cursor(Number(name.slice(name.lastIndexOf(':') + 1)))
+    const cursor = LEGACY.githubCursor(Number(name.slice(name.lastIndexOf(':') + 1)))
     const current = store.get(cursor)
     if (at && !(current && current >= at)) store.set(cursor, at)
     store.delete(name)
@@ -615,4 +629,123 @@ function assessmentTriggers(store: Store): void {
     store.db.prepare(`INSERT INTO effect (kind, key, value, seq, due, since) VALUES ('assessment', ?, ?, ?, ?, ?) ON CONFLICT(kind, key) DO NOTHING`)
       .run(evaluation.id, JSON.stringify({ triggerId: evaluation.triggerIds[0] }), ++seq, Date.now(), new Date().toISOString())
   }
+}
+
+/**
+ * Delete every record of a Source this build no longer has: its triggers, threads, tickets, decisions, settings, policy
+ * parts, outbox receipts and cursors. Local records and settings unrelated to a Source stay untouched. Runs in the
+ * caller's transaction, so a failure leaves the database unchanged.
+ */
+export function migrateTo13(store: Store): void {
+  const removedTriggers = new Set(store.db.prepare("SELECT id FROM trigger WHERE value ->> '$.source' IS NOT NULL AND value ->> '$.source' <> 'local'")
+    .all().map(row => String(row.id)))
+  const removedThreads = new Set(store.db.prepare("SELECT key FROM thread WHERE value ->> '$.ref.source' IS NOT NULL AND value ->> '$.ref.source' <> 'local'")
+    .all().map(row => String(row.key)))
+  // A Thread key names its Source as a prefix; a key of another Source is not local even if its stored ref was rewritten.
+  for (const row of store.db.prepare('SELECT key FROM thread').all()) if (!String(row.key).startsWith('local:')) removedThreads.add(String(row.key))
+  const removedDecisions = new Set<string>()
+  for (const row of store.db.prepare('SELECT id, value FROM decision').all()) {
+    const decision = JSON.parse(String(row.value)) as Decision
+    const basisSource = (decision.mandate?.basis as { source?: string } | undefined)?.source
+    const removed = removedThreads.has(decision.threadKey) || decision.triggerIds.some(id => removedTriggers.has(id))
+      || (basisSource !== undefined && basisSource !== 'local')
+      || (decision.mandate?.actor.source !== undefined && decision.mandate.actor.source !== 'local')
+    if (removed) removedDecisions.add(decision.id)
+  }
+  const removedTickets = new Set<string>()
+  for (const row of store.db.prepare('SELECT id, value FROM ticket').all()) {
+    const ticket = JSON.parse(String(row.value)) as Ticket
+    const origin = ticket.origin
+    const originIds = origin ? [origin.triggerId, ...origin.triggerIds] : []
+    if (originIds.some(id => removedTriggers.has(id)) || removedDecisions.has(ticket.decisionId)) removedTickets.add(ticket.id)
+  }
+
+  for (const id of removedTickets) store.db.prepare('DELETE FROM ticket WHERE id = ?').run(id)
+  for (const id of removedDecisions) store.db.prepare('DELETE FROM decision WHERE id = ?').run(id)
+  for (const key of removedThreads) store.db.prepare('DELETE FROM thread WHERE key = ?').run(key)
+  for (const id of removedTriggers) {
+    store.db.prepare('DELETE FROM trigger WHERE id = ?').run(id)
+    store.db.prepare('DELETE FROM disposition WHERE id = ?').run(id)
+    store.db.prepare('DELETE FROM trigger_thread WHERE id = ?').run(id)
+  }
+  for (const key of removedThreads) store.db.prepare('DELETE FROM trigger_thread WHERE thread = ?').run(key)
+
+  // Keep local tickets whole, removing only references to records that no longer exist.
+  for (const ticket of store.tickets.list()) {
+    if (removedTickets.has(ticket.id)) continue
+    const inputs = ticket.inputs.filter(input => input.kind === 'trigger' ? !removedTriggers.has(input.triggerId)
+      : input.kind === 'reopen' ? !removedDecisions.has(input.decisionId) : true)
+    const keptInputs = new Set(inputs.map(input => input.id))
+    const undelivered = ticket.undelivered.filter(id => keptInputs.has(id))
+    const channels = ticket.channels.filter(channel => channel.source === 'local')
+    const follows = (ticket.follows ?? []).filter(follow => !removedThreads.has(follow.thread))
+    const answers = (ticket.answers ?? []).filter(id => !removedTriggers.has(id))
+    const attention = ticket.attention?.triggerId && removedTriggers.has(ticket.attention.triggerId)
+      ? { ...ticket.attention, triggerId: undefined } : ticket.attention
+    const next = { ...ticket, inputs, undelivered, channels,
+      ...ticket.origin ? { origin: { ...ticket.origin, triggerIds: ticket.origin.triggerIds.filter(id => !removedTriggers.has(id)) } } : {},
+      ...ticket.follows ? { follows: follows.length ? follows : undefined } : {},
+      ...ticket.answers ? { answers } : {}, ...ticket.attention ? { attention } : {} }
+    if (JSON.stringify(next) !== JSON.stringify(ticket)) store.tickets.save(next)
+  }
+  for (const thread of store.threads.list()) {
+    if (removedThreads.has(thread.key)) continue
+    const subscriptions = thread.subscriptions.filter(id => !removedTickets.has(id))
+    const context = thread.context?.filter(id => !removedTickets.has(id))
+    const correlated = thread.correlated.filter(key => !removedThreads.has(key))
+    const pending = thread.pending.filter(id => !removedTriggers.has(id))
+    const evaluating = thread.evaluating && thread.evaluating.triggerIds.some(id => removedTriggers.has(id)) ? undefined : thread.evaluating
+    const next = { ...thread, subscriptions, correlated, pending, ...thread.context ? { context } : {}, ...evaluating ? { evaluating } : {} }
+    if (!evaluating) delete (next as { evaluating?: unknown }).evaluating
+    if (JSON.stringify(next) !== JSON.stringify(thread)) store.threads.save(next)
+  }
+
+  // Strip the removed Sources from the current settings and every saved settings revision, keeping unrelated settings.
+  const clean = (settings: Settings): Settings => ({
+    ...settings,
+    sources: Object.fromEntries(Object.entries(settings.sources).filter(([id]) => id === 'local')),
+    policy: { ...settings.policy, sources: Object.fromEntries(Object.entries(settings.policy.sources).filter(([id]) => id === 'local')) },
+  })
+  const stored = store.get<unknown>('settings')
+  if (stored !== undefined) {
+    const parsed = SettingsSchema.safeParse(stored)
+    if (parsed.success) store.set('settings', clean(parsed.data))
+  }
+  for (const name of store.keys('settings-version:')) {
+    const version = store.get<{ settings?: unknown }>(name)
+    if (!version?.settings) continue
+    const parsed = SettingsSchema.safeParse(version.settings)
+    if (!parsed.success) continue
+    const settings = clean(parsed.data)
+    store.set(name, { ...version, settings, policyVersion: policyVersion(settings) })
+  }
+  for (const name of store.keys('source-labels:')) if (name.slice('source-labels:'.length) !== 'local') store.delete(name)
+  for (const prefix of ['github-', 'feishu-', 'thread-seen:', 'thread-initialized:']) for (const name of store.keys(prefix)) store.delete(name)
+
+  // A reply to a removed Source can never be delivered, and its reply effect would wait forever.
+  const receipts = store.db.prepare("SELECT id FROM outbox WHERE value ->> '$.channel.source' IS NOT NULL AND value ->> '$.channel.source' <> 'local'")
+    .all().map(row => String(row.id))
+  for (const id of receipts) {
+    store.db.prepare('DELETE FROM outbox WHERE id = ?').run(id)
+    store.db.prepare("DELETE FROM effect WHERE kind = 'reply' AND key = ?").run(id)
+  }
+  for (const row of store.db.prepare("SELECT key, value FROM effect WHERE kind = 'assessment'").all()) {
+    const payload = JSON.parse(String(row.value)) as { triggerId?: unknown }
+    if (typeof payload.triggerId === 'string' && removedTriggers.has(payload.triggerId)) {
+      store.db.prepare("DELETE FROM effect WHERE kind = 'assessment' AND key = ?").run(String(row.key))
+    }
+  }
+}
+
+/**
+ * Copy the database to `<stateDir>/backups/` before a migration, with a filesystem-safe timestamp. The caller checkpoints
+ * the write-ahead log first so the copy is complete; a failed copy refuses the migration and leaves the database unchanged.
+ */
+export function backupDatabase(path: string, at = new Date()): string {
+  const directory = join(dirname(path), 'backups')
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const stamp = at.toISOString().replace(/[:.]/g, '-')
+  const file = join(directory, `${basename(path, extname(path))}-${stamp}.sqlite`)
+  copyFileSync(path, file, constants.COPYFILE_EXCL)
+  return file
 }

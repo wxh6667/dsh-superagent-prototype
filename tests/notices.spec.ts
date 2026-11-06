@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { Store } from '../src/app/store.ts'
-import { followupNotice, reportRelay, resultRelay, threadFollowedNotice } from '../src/app/notices.ts'
+import { followupNotice, reportRelay, resultRelay } from '../src/app/notices.ts'
 import type { SourceRegistry } from '../src/sources/registry.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
@@ -53,9 +53,4 @@ it('selects the first live ticket swarm for a follow-up relay, else its trigger 
   store.tickets.save(ticket('t2', { swarmId: undefined }))
   store.triggers.saveDisposition(metad.id, { fanout: ['t2'], at: metad.at })
   expect(followupNotice(store, sources, metad.id)).toMatchObject({ id: `followup:${metad.id}`, swarmId: 'swarm-b' })
-})
-
-it('has a thread-followed notice carry its swarm as the fourth element', () => {
-  expect(threadFollowedNotice('t1', 'github:7', 'The issue it fixes', 'swarm-a')[3]).toBe('swarm-a')
-  expect(threadFollowedNotice('t1', 'github:7', 'The issue it fixes')[3]).toBeUndefined()
 })

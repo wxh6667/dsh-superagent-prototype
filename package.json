@@ -4,7 +4,7 @@
   "license": "MIT",
   "version": "0.1.0",
   "private": true,
-  "description": "A local-only DSH (DeepSeek Harness) swarm bundle: a swarm launcher starts one master Session per mission, dispatches one worker Session per task, and coordinates the work through Trellis tasks and isolated git worktrees, with no GitHub or Feishu source.",
+  "description": "A local-only DSH (DeepSeek Harness) swarm bundle: a swarm launcher starts one master Session per mission, dispatches one worker Session per task, and coordinates the work through Trellis tasks and isolated git worktrees, with no remote Source.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

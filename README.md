@@ -4,13 +4,13 @@
 
 dsh-superagent is a local-only coding swarm bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). Clicking **Superagent** opens a launcher. From there you create a goal-scoped swarm with a short brief; the swarm owns one master Session and opens one worker Session per task.
 
-Workers run in isolated git worktrees, use the repository's own `scripts/verify.sh`, and coordinate through Tickets, typed reports and Trellis task artifacts. The master plans with Trellis, dispatches independent local tasks, reviews the diffs and verification evidence, and commits. GitHub and Feishu Sources are no longer mounted; pull-request delivery is retired. Historical remote Tickets stay readable but create no work.
+Workers run in isolated git worktrees, use the repository's own `scripts/verify.sh`, and coordinate through Tickets, typed reports and Trellis task artifacts. The master plans with Trellis, dispatches independent local tasks, reviews the diffs and verification evidence, and commits. Only the Local Source is mounted; earlier GitHub and Feishu records are purged by the schema 13 migration, and pull-request delivery is retired.
 
 The launcher and the local Source are the product surface. The Source tab shows only the Local Source: its repository, base branch, verification command and local actor. The launcher pre-fills the workspace from that Source; a missing workspace is the only reason to type one.
 
 ## Setup
 
-Use [docs/006 Deployment](docs/006-deployment.md), **Local repository** section: point the Local Source at a git repository initialized with Trellis, set its verification command, add the local actor to the Policy's local allowed list, and configure the worktree `prepare` command. The numbered documents retain the design history of the retired remote adapters; those sections are dormant.
+Use [docs/006 Deployment](docs/006-deployment.md), **Local repository** section: point the Local Source at a git repository initialized with Trellis, set its verification command, add the local actor to the Policy's local allowed list, and configure the worktree `prepare` command.
 
 The profile needs a model provider. It does not need a GitHub account or a Feishu bot.
 
@@ -25,8 +25,6 @@ The profile needs a model provider. It does not need a GitHub account or a Feish
 - [006 Deployment](docs/006-deployment.md)
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md)
-
-Remote Source, PR and Feishu material in these documents describes retained design history, not the mounted product.
 
 ## Development
 

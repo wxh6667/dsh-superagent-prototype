@@ -37,10 +37,6 @@ function brief(ticket: Ticket) {
 }
 /** Creates a one-off receipt notice with a unique `name` key so repeated occurrences of the same event are each delivered instead of coalescing. */
 export const receiptNotice = (value: Record<string, unknown>, summary: string): Notice => [key('receipt', randomUUID()), value, summary]
-/** Builds a notice that a person removed a thread's subscriptions at `at`; a later removal of the same thread replaces an unsent waiting notice. */
-export const subscriptionNotice = (thread: string, at?: string): Notice => [`subscription:${thread}`,
-  { subscription_changes: [{ thread, removed: true }], ...at ? { at } : {} }, `Removed the subscriptions on thread ${thread}`]
-
 /**
  * Converts an unsolicited domain event into a main-Session notice (`ticket.ended`, `trigger.requeued`, or
  * `thread.unsubscribed` by a person or executor); returns `undefined` for events that require no notice.
@@ -56,22 +52,8 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
     const id = event.data.triggerId
     return receiptNotice({ trigger_requeued: id, read: `trigger/${id}`, at }, `Trigger ${id} queued for a fresh assessment`)
   }
-  if (event.type === 'thread.unsubscribed' && event.data.by === 'person') return subscriptionNotice(event.data.threadKey, at)
-  if (event.type === 'thread.unsubscribed') {
-    const { ticketId, threadKey: thread, reason } = event.data
-    const note = 'Its Executor found this thread unrelated after reading it; attach later triggers there to this ticket only when they '
-      + 'point at it explicitly.'
-    return receiptNotice({ thread_unrelated: { ticket_id: ticketId, thread, reason }, at, note },
-      `Ticket ${ticketId} no longer follows thread ${thread}: ${reason}`)
-  }
   return undefined
 }
-
-/** Builds a background notice when a ticket's worker subscribes to a related thread for context only; `swarmId` names the owning swarm's master. */
-export const threadFollowedNotice = (ticketId: string, thread: string, reason: string, swarmId?: string): Notice =>
-  [key('receipt', randomUUID()), { thread_followed: { ticket_id: ticketId, thread, reason },
-    note: 'For context only: its messages reach this ticket and grant nothing.' },
-    `Ticket ${ticketId} follows thread ${thread} for context: ${reason}`, swarmId]
 
 /** Steering relay payload for the main Session: `id` is the request ID that makes delivery idempotent, `text` is the message body, and `swarmId` names the owning swarm's master. */
 export interface Relay { id: string; text: string; swarmId?: string }
