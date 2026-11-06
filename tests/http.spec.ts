@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { registerHttp } from '../src/app/http.ts'
-import type { Swarm } from '../src/core/index.ts'
+import type { Swarm, Ticket } from '../src/core/index.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
@@ -118,20 +118,28 @@ const swarmRecord = (id: string, status: Swarm['status'] = 'active'): Swarm => (
   budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 }, status, masterSessionId: `orchestrator-${id}`,
   createdAt: '2026-11-06T00:00:00Z', ...status === 'completed' ? { completedAt: '2026-11-06T01:00:00Z' } : {},
 })
+const ticketRecord = (id: string, swarmId: string, fields: Partial<Ticket> = {}): Ticket => ({
+  id, title: `Ticket ${id}`, swarmId, decisionId: '',
+  mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: { source: 'local', id: '' }, scope: '' },
+  channels: [], assignments: [], inputs: [], undelivered: [], createdAt: '2026-11-06T00:00:00Z', updatedAt: '2026-11-06T00:00:00Z',
+  origin: { triggerId: '', triggerIds: [] }, ...fields,
+})
 
 it('lists swarms with the launcher defaults and creates, opens and finishes one', async () => {
   const active = swarmRecord('s1'), legacy = { ...swarmRecord('legacy', 'completed'), masterSessionId: '', legacy: true as const }
   const created = { ...active, title: 'Ship', mission: 'Do it' }
   const completed = { ...active, status: 'completed' as const, completedAt: '2026-11-06T01:00:00Z' }
   const create = vi.fn(async () => created), open = vi.fn(async () => active), finish = vi.fn(async () => completed)
+  const workspaces = { longTerm: () => [{ id: 'w1', path: '/srv/repo', title: 'repo' }] }
   const call = serve({
     masterId: 'legacy-master',
-    store: { swarms: { list: () => [active, legacy] },
+    store: { swarms: { list: () => [active, legacy] }, tickets: { list: () => [] },
       settings: () => SettingsSchema.parse({ sources: { local: { enabled: true, config: { repository: '/srv/repo' } } } }) },
-    swarms: { create, open, finish },
+    workspaces, swarms: { create, open, finish },
   })
-  expect(await call('GET', 'swarms')).toEqual({ status: 200,
-    body: { items: [active, legacy], defaultWorkspace: '/srv/repo', legacyMasterId: 'legacy-master' } })
+  expect(await call('GET', 'swarms')).toEqual({ status: 200, body: {
+    items: [{ ...active, tasks: { running: 0, pending: 0, ended: 0 } }, { ...legacy, tasks: { running: 0, pending: 0, ended: 0 } }],
+    workspaces: [{ id: 'w1', path: '/srv/repo', title: 'repo' }], defaultWorkspace: '/srv/repo', legacyMasterId: 'legacy-master' } })
   const brief = { title: ' Ship ', mission: ' Do it ', acceptance: ' Works ', scope: ' repo ', workspace: '/srv/repo',
     verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } }
   expect(await call('POST', 'swarms', brief)).toEqual({ status: 200, body: { swarm: created, masterId: 'orchestrator-s1' } })
@@ -146,7 +154,8 @@ it('lists swarms with the launcher defaults and creates, opens and finishes one'
 it('refuses an invalid swarm brief and reports manager refusals as 400 with their message', async () => {
   const call = serve({
     masterId: 'm',
-    store: { swarms: { list: () => [] }, settings: () => SettingsSchema.parse({}) },
+    store: { swarms: { list: () => [] }, tickets: { list: () => [] }, settings: () => SettingsSchema.parse({}) },
+    workspaces: { longTerm: () => [] },
     swarms: { create: async () => { throw new Error('Not a Trellis workspace') },
       open: async () => { throw new Error('Unknown swarm s1') },
       finish: async () => { throw new Error('Swarm s1 still has 2 open tickets') } },
@@ -160,5 +169,31 @@ it('refuses an invalid swarm brief and reports manager refusals as 400 with thei
   expect(await call('POST', 'swarms/s1/open')).toEqual({ status: 400, body: { error: 'Unknown swarm s1' } })
   expect(await call('POST', 'swarms/s1/finish')).toEqual({ status: 400,
     body: { error: 'Swarm s1 still has 2 open tickets' } })
-  expect(await call('GET', 'swarms')).toEqual({ status: 200, body: { items: [], defaultWorkspace: '', legacyMasterId: 'm' } })
+  expect(await call('GET', 'swarms')).toEqual({ status: 200,
+    body: { items: [], workspaces: [], defaultWorkspace: '', legacyMasterId: 'm' } })
+})
+
+it('reports each swarm\'s running, queued and just-ended tasks and its latest change', async () => {
+  const active = swarmRecord('s1'), other = swarmRecord('s2')
+  const now = new Date().toISOString()
+  const run = ticketRecord('run', 's1', { updatedAt: '2026-11-06T00:00:01Z', assignments: [{ id: 'a1', state: 'running', createdAt: now }] })
+  const queued = ticketRecord('queued', 's1', { updatedAt: '2026-11-06T00:00:02Z', assignments: [{ id: 'a2', state: 'pending', createdAt: now }] })
+  const done = ticketRecord('done', 's1', { updatedAt: '2026-11-06T00:00:03Z', ended: { at: now, by: 'executor', outcome: 'completed' },
+    assignments: [{ id: 'a3', state: 'ended', createdAt: now }] })
+  // A Ticket of another swarm and one that ended long ago do not change this swarm's counts.
+  const elsewhere = ticketRecord('elsewhere', 's2', { assignments: [{ id: 'a4', state: 'running', createdAt: now }] })
+  const old = ticketRecord('old', 's1', { updatedAt: '2026-01-01T00:00:00Z', ended: { at: '2026-01-01T00:00:00Z', by: 'executor', outcome: 'completed' } })
+  const call = serve({
+    masterId: 'm',
+    store: { swarms: { list: () => [active, other] }, tickets: { list: () => [run, queued, done, elsewhere, old] },
+      settings: () => SettingsSchema.parse({}) },
+    workspaces: { longTerm: () => [] },
+  })
+  const body = (await call('GET', 'swarms')).body as { items: { id: string; tasks: unknown }[] }
+  expect(body.items.map(item => ({ id: item.id, tasks: item.tasks }))).toEqual([
+    { id: 's1', tasks: { running: 1, pending: 1, ended: 1,
+      latest: { ticketId: 'done', title: 'Ticket done', at: '2026-11-06T00:00:03Z', stage: { stage: 'ended' } } } },
+    { id: 's2', tasks: { running: 1, pending: 0, ended: 0,
+      latest: { ticketId: 'elsewhere', title: 'Ticket elsewhere', at: '2026-11-06T00:00:00Z', stage: { stage: 'working' } } } },
+  ])
 })

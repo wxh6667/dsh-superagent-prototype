@@ -40,6 +40,7 @@ export const ticketSummary = (fields: Partial<TicketFields> = {}, stage: TicketS
 export const swarmSummary = (id: string, status: SwarmView['status'], fields: Partial<SwarmView> = {}): SwarmView => ({
   id, title: `Swarm ${id}`, mission: `Mission ${id}`, workspace: '/srv/repo', verify: 'scripts/verify.sh', prepare: '',
   budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 }, status, masterSessionId: `orchestrator-${id}`,
+  tasks: { running: 0, pending: 0, ended: 0 },
   createdAt: '2026-11-01T00:00:00Z', ...status === 'completed' ? { completedAt: '2026-11-02T00:00:00Z' } : {}, ...fields,
 })
 export const threadSummary = (fields: Partial<ThreadRow> = {}): ThreadRow => ({
@@ -278,13 +279,13 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
-  'GET swarms': { answer: () => ({ items: server.swarms, defaultWorkspace: server.defaultWorkspace, legacyMasterId: 'master' }) },
+  'GET swarms': { answer: () => ({ items: server.swarms, workspaces: [], defaultWorkspace: server.defaultWorkspace, legacyMasterId: 'master' }) },
   'POST swarms': { body: true, answer: ({ body }) => {
     const id = `swarm-${server.swarms.length + 1}`
     const swarm: SwarmView = { id, title: body.title, mission: body.mission, ...body.acceptance ? { acceptance: body.acceptance } : {},
       ...body.scope ? { scope: body.scope } : {}, workspace: body.workspace, verify: body.verify || 'scripts/verify.sh',
       prepare: body.prepare ?? '', budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3, ...body.budget }, status: 'active',
-      masterSessionId: `orchestrator-${id}`, createdAt: '2026-11-06T00:00:00Z' }
+      masterSessionId: `orchestrator-${id}`, createdAt: '2026-11-06T00:00:00Z', tasks: { running: 0, pending: 0, ended: 0 } }
     server.swarms = [swarm, ...server.swarms]
     return { swarm, masterId: swarm.masterSessionId }
   } },

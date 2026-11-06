@@ -20,12 +20,14 @@ import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
 import type { Store } from './store.ts'
+import type { SwarmWorkspaces } from './swarm-workspaces.ts'
 import type { LinkTarget, ViewHost } from './views/records.ts'
 import type { Variable } from './execution-environment.ts'
 import { policyHistory } from './settings-history.ts'
 import { overview } from './views/overview.ts'
 import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
+import { swarmsView } from './views/swarms.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
@@ -37,6 +39,8 @@ export interface HttpHost {
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
   readonly swarms: Pick<SwarmManager, 'create' | 'open' | 'finish'>
+  /** The long-term workspaces the launcher offers, without a swarm's temporary worktree registrations. */
+  readonly workspaces: Pick<SwarmWorkspaces, 'longTerm'>
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
   readonly machine: Machine
@@ -192,7 +196,8 @@ function routes(runtime: HttpHost): Routes {
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
     'GET state': () => stateView(runtime),
-    'GET swarms': () => ({ items: store.swarms.list(), defaultWorkspace: defaultWorkspace(runtime), legacyMasterId: runtime.masterId }),
+    'GET swarms': () => ({ items: swarmsView(store.swarms.list(), store.tickets.list()),
+      workspaces: runtime.workspaces.longTerm(), defaultWorkspace: defaultWorkspace(runtime), legacyMasterId: runtime.masterId }),
     'POST swarms': async ({ body }) => {
       const input = parseSwarmBrief(await body())
       const swarm = await swarmCall(() => runtime.swarms.create(input))

@@ -48,7 +48,7 @@ Open **Superagent → Settings → Sources** and fill the **Local** card:
 
 The Local Source is off until this card is saved and the Source switched on. Saving the Source restarts setup, which validates the path: it must be an absolute directory, a git repository, and contain `.trellis`. A local request only becomes a Ticket when its `actor` is listed under **Policy → Local**.
 
-The launcher reads the local repository as its default workspace. A swarm may name another registered workspace, and each Ticket runs in a worktree created from that workspace.
+The launcher reads the local repository as its default workspace. A swarm may name another registered workspace, and each Ticket runs in a worktree created from that workspace. A Session registers a workspace for its directory: the master for the swarm workspace, each worker for its worktree. Registrations the swarm added are removed when it finishes, while a workspace the person already had stays. Removing a registration keeps its directory, worktree and session logs. The launcher offers only these long-term workspaces, not the swarm's temporary worktree registrations.
 
 ### Execution environment
 

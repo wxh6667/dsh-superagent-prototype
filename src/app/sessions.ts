@@ -15,6 +15,7 @@ import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
+import type { SwarmWorkspaces } from './swarm-workspaces.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
 
@@ -25,6 +26,8 @@ export interface SessionsHost {
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'settings' | 'get' | 'set' | 'keys'>
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'skills'>
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
+  /** Records the workspace a swarm's Session creates or reuses, so its end removes only the registrations it added. */
+  readonly workspaces: Pick<SwarmWorkspaces, 'ensure'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
   readonly masterId: string
@@ -179,14 +182,18 @@ export class Sessions {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
   }
-  /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
-  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
+  /**
+   * Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools,
+   * sets `danger-full-access` permissions, and renames it to `title`. `swarmId`, when given, receives the workspace
+   * registration this call creates or reuses so the swarm's end removes only what it added.
+   */
+  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker', swarmId?: string): Promise<Agent> {
     // Register before any await so the `agent/created` decoration already treats this Session as a master.
     if (role === 'orchestrator') this.masters.add(id)
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
-      const workspace = await ctx.workspaceRegistry.create(cwd)
+      const workspace = await this.host.workspaces.ensure(cwd, swarmId)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
         agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
@@ -200,9 +207,9 @@ export class Sessions {
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
-  /** Ensures the master Session of a swarm; the bounded call the SwarmManager uses. */
-  async ensureMaster(id: string, cwd: string, title: string): Promise<Agent> {
-    return this.ensure(id, cwd, title, 'orchestrator')
+  /** Ensures the master Session of a swarm, recording its workspace for `swarmId`; the bounded call the SwarmManager uses. */
+  async ensureMaster(id: string, cwd: string, title: string, swarmId?: string): Promise<Agent> {
+    return this.ensure(id, cwd, title, 'orchestrator', swarmId)
   }
   /** Whether `sessionId` is a registered master Session, including the legacy single master. */
   isMaster(sessionId: string): boolean {

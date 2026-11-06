@@ -42,6 +42,7 @@ import { Setup } from './setup.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions, commandOf } from './sessions.ts'
 import { SwarmManager } from './swarms.ts'
+import { SwarmWorkspaces } from './swarm-workspaces.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -66,6 +67,8 @@ export class Runtime extends Service implements SourceHost {
   readonly commands: Commands
   readonly sessions: Sessions
   readonly swarms: SwarmManager
+  /** The workspace registrations each swarm's Sessions add, and their cleanup at its end. */
+  readonly swarmWorkspaces: SwarmWorkspaces
   readonly settings: Settings
   readonly executor: DshExecutor
   readonly assessor: MasterAssessor
@@ -121,13 +124,15 @@ export class Runtime extends Service implements SourceHost {
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, sources, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision), sourceLink: link }
+      const swarmWorkspaces = this.swarmWorkspaces = new SwarmWorkspaces({ store, registry: ctx.workspaceRegistry,
+        report: error => ctx.logger.warn('dsh-superagent could not clean up a swarm workspace: %s', String(error)) })
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         // Ticket-related messages target their swarm's master; the legacy master is the fallback for absent or unknown swarms.
         masterFor: swarmId => this.swarms.masterFor(swarmId) ?? (swarmId ? undefined : this.masterId),
         lifetime: this.lifetime, commitGuard: (execution, sessionId) => this.commitGuard(execution, sessionId),
-        closing: () => this.closing(), environment,
+        closing: () => this.closing(), environment, workspaces: swarmWorkspaces,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent, this.swarms.swarmOf(agent.id)) })
-      this.swarms = new SwarmManager({ store, sessions, workspace: ctx.workspaceRegistry,
+      this.swarms = new SwarmManager({ store, sessions, workspace: ctx.workspaceRegistry, workspaces: swarmWorkspaces,
         report: (swarm, error) => ctx.logger.warn('dsh-superagent could not restore swarm %s: %s', swarm.id, String(error)) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
@@ -269,9 +274,9 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, swarms, health, machine, masterId, ready, setup,
+    const { store, sources, prompts, sessions, settings, engine, executor, swarms, swarmWorkspaces, health, machine, masterId, ready, setup,
       passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, swarms, health, machine, masterId, ready,
+    return { store, sources, prompts, sessions, settings, engine, executor, swarms, workspaces: swarmWorkspaces, health, machine, masterId, ready,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

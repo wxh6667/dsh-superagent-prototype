@@ -321,7 +321,8 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged prompt text: `promptFile`, which joins a file's one-sentence lines into paragraphs |
 | `src/app/sessions.ts` | Sessions |
-| `src/app/swarms.ts` | The SwarmManager: creates, lists, opens and completes swarms, and keeps active swarms' master Sessions reachable |
+| `src/app/swarms.ts` | The SwarmManager: creates, lists, opens and completes swarms, keeps active swarms' master Sessions reachable, and removes the workspace registrations a completed swarm added |
+| `src/app/swarm-workspaces.ts` | `SwarmWorkspaces`: records the workspace registrations each swarm's Sessions create or reuse, removes the created ones when the swarm ends, retries a completed swarm's leftovers at startup, and lists the long-term workspaces the launcher may offer |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
@@ -339,6 +340,7 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
 | `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page, the Mandate basis facts and the Executor's load |
+| `src/app/views/swarms.ts` | The swarms with their task status: running, queued and just-ended Tickets, and the latest change, as the launcher and session header read them |
 | `src/app/views/threads.ts` | The Thread lists, a Thread's timeline, the search and the Decision list |
 | `src/app/views/sources.ts` | The Source status: the Local Source's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
@@ -407,7 +409,8 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
 | `tests/migration.spec.ts` | The schema 10 through 12 migration: every stored record in its current shape, the legacy swarm, and the refusal of older schemas |
 | `tests/swarm.spec.ts` | The Swarm repository and the schema 11 to 12 migration: a fresh database, the legacy swarm, owned historical Tickets and idempotent reopen |
-| `tests/swarms.spec.ts` | The SwarmManager on a real Store: creation validation, master ensure/unarchive, listing, the open and finish lifecycle, startup repair of active swarms, and master resolution for active tickets |
+| `tests/swarms.spec.ts` | The SwarmManager on a real Store: creation validation, master ensure/unarchive, listing, the open and finish lifecycle, workspace cleanup that never blocks completion, startup repair and cleanup retry, and master resolution for active tickets |
+| `tests/swarm-workspaces.spec.ts` | `SwarmWorkspaces`: new versus reused registrations, cleanup failures kept for a retry, user and local workspaces retained, the long-term list, and completed or orphaned leftovers cleaned at startup |
 | `tests/notices.spec.ts` | Notices and relays carry their owning swarm: result, report/attention and follow-up relays, the trigger-metadata fallback, and the legacy empty case |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |

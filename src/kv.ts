@@ -4,6 +4,7 @@
  */
 import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
+import type { SwarmWorkspaceRecord } from './app/swarm-workspaces.ts'
 import type { SettingsSave } from './policy.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
@@ -32,6 +33,8 @@ export const KV = {
   runtime: { masterId: record<string>('master-id') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
+  /** SwarmWorkspaces: the workspace registrations each swarm's Sessions created or reused, newest record last. */
+  swarms: { workspaces: family<SwarmWorkspaceRecord, [swarm: string]>('swarm-workspaces:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
   queues: { relays: record<{ id: string; text: string }[]>('relay-queue'), unsubscribed: record<string[]>('subscription-results'),
     prompts: record<number | null>('prompt-notification'), settings: record<number | null>('settings-notification') },

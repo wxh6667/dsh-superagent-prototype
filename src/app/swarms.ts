@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path'
 import { key, type Swarm, type SwarmBudget } from '../core/index.ts'
 import { MAX_ACTIVE_SWARMS, SWARM_LIMITS } from '../limits.ts'
 import type { Store } from './store.ts'
+import type { SwarmWorkspaces } from './swarm-workspaces.ts'
 
 /** What a person supplies when starting a swarm; only the title, mission and workspace are required. */
 export interface SwarmCreateInput {
@@ -21,12 +22,16 @@ export interface SwarmCreateInput {
   budget?: Partial<SwarmBudget>
 }
 
-/** The narrow dependencies the SwarmManager uses: swarm persistence, master Sessions and workspace archival. */
+/**
+ * The narrow dependencies the SwarmManager uses: swarm persistence, master Sessions, workspace archival, and the
+ * workspace registrations each swarm's Sessions added.
+ */
 export interface SwarmHost {
   readonly store: Pick<Store, 'swarms' | 'tickets'>
-  readonly sessions: { ensureMaster(id: string, cwd: string, title: string): Promise<unknown> }
+  readonly sessions: { ensureMaster(id: string, cwd: string, title: string, swarmId?: string): Promise<unknown> }
   readonly workspace: { archiveSession(id: string): Promise<void>; unarchiveSession(id: string): Promise<void> }
-  /** Receives a startup repair failure for one swarm without stopping the repair of the others. */
+  readonly workspaces: Pick<SwarmWorkspaces, 'cleanup' | 'reconcile'>
+  /** Receives a startup repair or cleanup failure for one swarm without stopping the work on the others. */
   readonly report?: (swarm: Swarm, error: unknown) => void
 }
 
@@ -59,7 +64,7 @@ export class SwarmManager {
 
   /**
    * Validates the brief and workspace, creates the swarm's master Session, then saves the active Swarm.
-   * A failure to create the master leaves no swarm record behind.
+   * A failure to create the master leaves no swarm record behind and removes the workspace registration it added.
    */
   async create(input: SwarmCreateInput): Promise<Swarm> {
     const title = input.title.trim(), mission = input.mission.trim()
@@ -72,7 +77,12 @@ export class SwarmManager {
     const budget = budgetOf(input.budget)
     const id = key('swarm', title, randomUUID())
     const masterSessionId = `orchestrator-${id}`
-    await this.host.sessions.ensureMaster(masterSessionId, workspace, `[swarm] ${title}`)
+    try { await this.host.sessions.ensureMaster(masterSessionId, workspace, `[swarm] ${title}`, id) }
+    catch (error) {
+      // The swarm never existed, so no later finish would clean up what creating its master registered.
+      await this.host.workspaces.cleanup(id).catch(() => { /* The failure that stopped creation is the one to report. */ })
+      throw error
+    }
     const acceptance = input.acceptance?.trim(), scope = input.scope?.trim()
     const swarm: Swarm = {
       id, title, mission,
@@ -127,8 +137,9 @@ export class SwarmManager {
   }
 
   /**
-   * Completes an active swarm after archiving its master Session. Refused while any open Ticket still carries
-   * `swarmId === id`; an archive failure leaves the swarm active.
+   * Completes an active swarm after archiving its master Session, then removes the workspace registrations its
+   * Sessions added. Refused while any open Ticket still carries `swarmId === id`; an archive failure leaves the
+   * swarm active. A cleanup failure is reported and keeps its record for the next startup, but never blocks completion.
    */
   async finish(id: string): Promise<Swarm> {
     const swarm = this.require(id)
@@ -138,23 +149,28 @@ export class SwarmManager {
     await this.host.workspace.archiveSession(swarm.masterSessionId)
     const completed: Swarm = { ...swarm, status: 'completed', completedAt: new Date().toISOString() }
     this.host.store.swarms.save(completed)
+    try { await this.host.workspaces.cleanup(id) }
+    catch (error) { this.host.report?.(completed, error) }
     return completed
   }
 
   /**
-   * Repairs every active swarm's master at startup. One swarm that cannot be restored is reported and does not
-   * stop the others; completed and legacy swarms never wake.
+   * Repairs every active swarm's master at startup, then retries the workspace cleanup of completed or missing
+   * swarms. One swarm that cannot be restored is reported and does not stop the others; completed and legacy swarms
+   * never wake.
    */
   async ensureActive(): Promise<void> {
     for (const swarm of this.host.store.swarms.active()) {
       try { await this.restore(swarm) }
       catch (error) { this.host.report?.(swarm, error) }
     }
+    // Records left by a failed cleanup, an interrupted end, or a migration are cleaned now, before the panel opens.
+    await this.host.workspaces.reconcile(this.host.store.swarms.list())
   }
 
   /** Ensures the swarm has a master Session, then unarchives it if DSH had archived it. */
   private async restore(swarm: Swarm): Promise<void> {
-    await this.host.sessions.ensureMaster(swarm.masterSessionId, swarm.workspace, `[swarm] ${swarm.title}`)
+    await this.host.sessions.ensureMaster(swarm.masterSessionId, swarm.workspace, `[swarm] ${swarm.title}`, swarm.id)
     await this.host.workspace.unarchiveSession(swarm.masterSessionId)
   }
 

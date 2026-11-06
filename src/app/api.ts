@@ -4,9 +4,11 @@ import type { Swarm, SwarmBudget } from '../core/index.ts'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
+import type { RegisteredWorkspace } from './swarm-workspaces.ts'
 import type { OverviewView } from './views/overview.ts'
 import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
+import type { SwarmTaskSummary } from './views/swarms.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
 
@@ -31,9 +33,11 @@ export interface SwarmBriefInput {
   budget?: Partial<SwarmBudget>
 }
 
+/** A swarm row as the launcher and the session header read it: the stored Swarm plus its current task status. */
+export type SwarmListItem = Swarm & { tasks: SwarmTaskSummary }
 export interface Api {
   'GET state': { response: StateView }
-  'GET swarms': { response: { items: Swarm[]; defaultWorkspace: string; legacyMasterId: string } }
+  'GET swarms': { response: { items: SwarmListItem[]; workspaces: RegisteredWorkspace[]; defaultWorkspace: string; legacyMasterId: string } }
   'POST swarms': { body: SwarmBriefInput; response: { swarm: Swarm; masterId: string } }
   'POST swarms/:id/open': { response: { swarm: Swarm; masterId: string } }
   'POST swarms/:id/finish': { response: { swarm: Swarm } }
