@@ -99,3 +99,53 @@ it('logs a notice whose Session no longer exists instead of failing silently', a
   await h.runtime.effects.idle('notice')
   expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not deliver the notice'), 'gone', SIDE, 'session/not-found')
 })
+
+it('dispatches from a master Session saved with DSH\'s dsh_ prefix and reports back to it', async () => {
+  const id = 'prefixed', master = `dsh_orchestrator-${id}`
+  h.runtime.store.swarms.save({
+    id, title: 'Prefixed', mission: 'Check the prefixed master', workspace: repository(),
+    verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 },
+    status: 'active', masterSessionId: master, createdAt: '2026-11-06T00:00:00.000Z',
+  })
+  // Startup repairs the saved master as stored: its prefixed form is not rewritten to the bare one.
+  await h.runtime.swarms.ensureActive()
+  const taskDir = join(repository(), '.trellis', 'tasks', '11-06-prefixed-master')
+  mkdirSync(taskDir, { recursive: true })
+  const result = await h.runTool(master, 'orchestrator_local_dispatch', {
+    tasks: [{ task_dir: taskDir, title: 'Prefixed work', acknowledgement: '收到。' }],
+  })
+  await h.runtime.idle()
+  const ticket = h.runtime.store.tickets.get((result.results as { ticket: { ticket_id: string } }[])[0]!.ticket.ticket_id)!
+  expect(ticket.swarmId).toBe(id)
+  expect(h.runtime.store.triggers.get(ticket.origin.triggerId)?.threads[0]?.id).toBe(`local:${id}:11-06-prefixed-master`)
+  await h.runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
+  await h.runtime.idle()
+  expect(h.relays(master).filter(item => item.kind === 'worker_report')).toHaveLength(1)
+  expect(h.relays(h.runtime.masterId).filter(item => item.kind === 'worker_report')).toEqual([])
+})
+
+it('attributes a dispatch from a Session addressed with DSH\'s dsh_ prefix to the swarm that saved the bare master id', async () => {
+  mkdirSync(join(repository(), '.trellis', 'scripts'), { recursive: true })
+  writeFileSync(join(repository(), '.trellis', 'scripts', 'task.py'), '')
+  const swarm = await h.runtime.swarms.create({ title: 'Prefix alias', mission: 'Check the alias', workspace: repository() })
+  const prefixed = `dsh_${swarm.masterSessionId}`
+  // The registered bare master is recognized under DSH's prefixed form before that Session exists.
+  expect(h.runtime.sessions.isMaster(prefixed)).toBe(true)
+  await h.runtime.sessions.ensure(prefixed, repository(), '[swarm] Prefix alias', 'orchestrator')
+  // DSH addresses the one master Session by its prefixed id; the saved bare id resolves to it.
+  h.aliasSession(prefixed, swarm.masterSessionId)
+  const taskDir = join(repository(), '.trellis', 'tasks', '11-06-prefix-alias')
+  mkdirSync(taskDir, { recursive: true })
+  const result = await h.runTool(prefixed, 'orchestrator_local_dispatch', {
+    tasks: [{ task_dir: taskDir, title: 'Alias work', acknowledgement: '收到。' }],
+  })
+  await h.runtime.idle()
+  const ticket = h.runtime.store.tickets.get((result.results as { ticket: { ticket_id: string } }[])[0]!.ticket.ticket_id)!
+  expect(ticket.swarmId).toBe(swarm.id)
+  expect(ticket.originSessionId).toBe(prefixed)
+  expect(h.runtime.store.triggers.get(ticket.origin.triggerId)?.threads[0]?.id).toBe(`local:${swarm.id}:11-06-prefix-alias`)
+  await h.runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
+  await h.runtime.idle()
+  expect(h.relays(prefixed).filter(item => item.kind === 'worker_report')).toHaveLength(1)
+  expect(h.relays(swarm.masterSessionId).filter(item => item.kind === 'worker_report')).toEqual([])
+})

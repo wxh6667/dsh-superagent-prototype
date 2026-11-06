@@ -65,6 +65,33 @@ export function swarmBrief(swarm: Pick<Swarm, 'mission' | 'workspace' | 'accepta
     validation: swarm.verify, budget: swarm.budget })
 }
 
+/** DSH may address a Session with its `dsh_` prefix while a Swarm saves the bare id; both name the same Session. */
+const DSH_SESSION_PREFIX = 'dsh_'
+
+/** The Session id without DSH's `dsh_` prefix, so ids saved with and without it compare equal. */
+function bareSessionId(id: string): string {
+  return id.startsWith(DSH_SESSION_PREFIX) ? id.slice(DSH_SESSION_PREFIX.length) : id
+}
+
+/** The Session id with DSH's `dsh_` prefix, when it lacks one. */
+function addressedSessionId(id: string): string {
+  return id.startsWith(DSH_SESSION_PREFIX) ? id : `${DSH_SESSION_PREFIX}${id}`
+}
+
+/** The forms one Session id may be addressed by: as given, and with DSH's `dsh_` prefix toggled. */
+function sessionForms(id: string): readonly string[] {
+  const bare = bareSessionId(id)
+  return bare === id ? [id, addressedSessionId(id)] : [id, bare]
+}
+
+/**
+ * Whether two ids name the same Session, whichever of them carries DSH's `dsh_` prefix.
+ * A Swarm's saved `masterSessionId` is never rewritten, so existing rows must resolve in either form.
+ */
+export function sameSession(a: string, b: string): boolean {
+  return bareSessionId(a) === bareSessionId(b)
+}
+
 /**
  * Owns Swarm persistence and master Sessions: it creates a swarm together with its `orchestrator-<id>` master,
  * reopens active swarms (ensuring and unarchiving their master), and completes a swarm once no ticket remains open.
@@ -124,18 +151,20 @@ export class SwarmManager {
 
   /**
    * The master Session that owns `swarmId`, or `undefined` when it is absent, unknown, completed, or legacy.
-   * A completed or legacy swarm has no master to wake, so ticket-related messages never route to it and fall back to
-   * the legacy master instead.
+   * `swarmId` may name the Swarm or its master Session, with or without DSH's `dsh_` prefix; the saved
+   * `masterSessionId` is returned as stored. A completed or legacy swarm has no master to wake, so ticket-related
+   * messages never route to it and fall back to the legacy master instead.
    */
   masterFor(swarmId?: string): string | undefined {
     if (!swarmId) return undefined
-    const swarm = this.host.store.swarms.get(swarmId)
+    const swarm = this.host.store.swarms.get(swarmId) ?? this.swarmOf(swarmId)
     return swarm && swarm.status === 'active' && !swarm.legacy && swarm.masterSessionId ? swarm.masterSessionId : undefined
   }
 
-  /** The active, non-legacy swarm whose master Session is `sessionId`, or `undefined` when `sessionId` owns none. */
+  /** The active, non-legacy swarm whose master Session is `sessionId`, with or without DSH's `dsh_` prefix. */
   swarmOf(sessionId: string): Swarm | undefined {
-    return this.host.store.swarms.active().find(swarm => !swarm.legacy && swarm.masterSessionId === sessionId)
+    return this.host.store.swarms.active().find(swarm => !swarm.legacy && swarm.masterSessionId !== ''
+      && sessionForms(swarm.masterSessionId).includes(sessionId))
   }
 
   /**

@@ -16,6 +16,7 @@ import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
+import { sameSession } from './swarms.ts'
 import type { SwarmWorkspaces } from './swarm-workspaces.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
@@ -216,9 +217,9 @@ export class Sessions {
   async ensureMaster(id: string, cwd: string, title: string, swarmId?: string): Promise<Agent> {
     return this.ensure(id, cwd, title, 'orchestrator', swarmId)
   }
-  /** Whether `sessionId` is a registered master Session, including the legacy single master. */
+  /** Whether `sessionId` is a registered master Session, including the legacy single master, with or without DSH's `dsh_` prefix. */
   isMaster(sessionId: string): boolean {
-    return this.masters.has(sessionId) || sessionId === this.host.masterId
+    return [...this.masters, this.host.masterId].some(id => sameSession(id, sessionId))
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {

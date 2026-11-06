@@ -152,11 +152,18 @@ it('gets, lists newest first and filters active swarms', () => {
 
 it('resolves an active swarm master and refuses completed, legacy, empty-master and unknown swarms', () => {
   store.swarms.save(swarm('a'))
+  store.swarms.save(swarm('prefixed', 'active', { masterSessionId: 'dsh_orchestrator-prefixed' }))
   store.swarms.save(swarm('done', 'completed'))
   store.swarms.save(swarm('legacy', 'completed', { legacy: true, masterSessionId: '' }))
   store.swarms.save(swarm('empty', 'active', { masterSessionId: '' }))
   const { manager } = fake()
   expect(manager.masterFor('a')).toBe('orchestrator-a')
+  // A saved master keeps the form it was stored with, and either form of its Session id resolves to it.
+  expect(manager.masterFor('prefixed')).toBe('dsh_orchestrator-prefixed')
+  expect(manager.masterFor('orchestrator-a')).toBe('orchestrator-a')
+  expect(manager.masterFor('dsh_orchestrator-a')).toBe('orchestrator-a')
+  expect(manager.masterFor('orchestrator-prefixed')).toBe('dsh_orchestrator-prefixed')
+  expect(manager.masterFor('dsh_orchestrator-prefixed')).toBe('dsh_orchestrator-prefixed')
   expect(manager.masterFor('done')).toBeUndefined()
   expect(manager.masterFor('legacy')).toBeUndefined()
   expect(manager.masterFor('empty')).toBeUndefined()
@@ -164,18 +171,36 @@ it('resolves an active swarm master and refuses completed, legacy, empty-master 
   expect(manager.masterFor()).toBeUndefined()
 })
 
-it('finds the active, non-legacy swarm whose master owns a Session', () => {
+it('finds the active, non-legacy swarm whose master owns a Session, with or without DSH\'s dsh_ prefix', () => {
   store.swarms.save(swarm('a'))
+  store.swarms.save(swarm('prefixed', 'active', { masterSessionId: 'dsh_orchestrator-prefixed' }))
   store.swarms.save(swarm('done', 'completed'))
   store.swarms.save(swarm('legacy', 'completed', { legacy: true, masterSessionId: '' }))
   store.swarms.save(swarm('legacy-active', 'active', { legacy: true }))
   const { manager } = fake()
   expect(manager.swarmOf('orchestrator-a')).toMatchObject({ id: 'a', status: 'active' })
+  expect(manager.swarmOf('dsh_orchestrator-a')).toMatchObject({ id: 'a', status: 'active' })
+  expect(manager.swarmOf('orchestrator-prefixed')).toMatchObject({ id: 'prefixed', status: 'active' })
+  expect(manager.swarmOf('dsh_orchestrator-prefixed')).toMatchObject({ id: 'prefixed', status: 'active' })
   expect(manager.swarmOf('orchestrator-done')).toBeUndefined()
+  expect(manager.swarmOf('dsh_orchestrator-done')).toBeUndefined()
   expect(manager.swarmOf('orchestrator-legacy')).toBeUndefined()
   expect(manager.swarmOf('orchestrator-legacy-active')).toBeUndefined()
   expect(manager.swarmOf('unknown-session')).toBeUndefined()
+  expect(manager.swarmOf('dsh_unknown-session')).toBeUndefined()
   expect(manager.swarmOf('')).toBeUndefined()
+})
+
+it('opens and finishes a swarm whose saved master already carries DSH\'s dsh_ prefix', async () => {
+  const { manager, ensured, unarchived, archived } = fake()
+  store.swarms.save(swarm('p', 'active', { masterSessionId: 'dsh_orchestrator-p' }))
+  await manager.open('p')
+  expect(ensured).toEqual([{ id: 'dsh_orchestrator-p', cwd: workspace, title: '[swarm] Swarm p', swarmId: 'p' }])
+  expect(unarchived).toEqual(['dsh_orchestrator-p'])
+  await manager.finish('p')
+  expect(archived).toEqual(['dsh_orchestrator-p'])
+  // The saved form is not rewritten by opening or finishing the swarm.
+  expect(store.swarms.get('p')).toMatchObject({ status: 'completed', masterSessionId: 'dsh_orchestrator-p' })
 })
 
 it('opens an active swarm by ensuring and unarchiving its master, and refuses completed or legacy swarms', async () => {

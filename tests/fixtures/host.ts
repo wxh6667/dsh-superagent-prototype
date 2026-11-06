@@ -146,7 +146,12 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const tools = new Map<string, Map<string, RegisteredTool>>()
   const deliveries = vi.fn<(request: Delivery) => void>()
   let http!: HttpHandler
-  const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
+  /** Session ids that resolve to another Session, as DSH addresses one Session with and without its `dsh_` prefix. */
+  const aliases = new Map<string, string>()
+  const resolveDefault = async (id: string) => {
+    const target = aliases.get(id) ?? id
+    return agents.has(target) ? { agent: agents.get(target) } : { error: { code: 'session/not-found' } }
+  }
   const controller = {
     create: vi.fn(async ({ sessionId }: { sessionId: string }) => {
       if (agents.has(sessionId)) return
@@ -221,7 +226,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
     sessionPersistence: persistence,
     // A Session's workspace is its cwd; the registry records nothing to list or delete in these tests.
-    workspaceRegistry: { list: () => [], create: async (cwd: string) => ({ id: cwd }), delete: async () => true },
+    workspaceRegistry: { list: () => [], create: async (cwd: string) => ({ id: cwd }), delete: async () => true,
+      archiveSession: async () => {}, unarchiveSession: async () => {} },
     permissionPresets: { set: () => {} }, subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service }
   const ctx = new Context()
@@ -287,11 +293,16 @@ export async function startRuntime(seed?: (store: Store) => void) {
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
   async function stop() { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }
+  /** Makes `alias` resolve to the Session `id`, as DSH does for a Session addressed with and without its `dsh_` prefix. */
+  function aliasSession(id: string, alias: string) {
+    if (!agents.has(id)) throw new Error(`No Session ${id}`)
+    aliases.set(alias, id)
+  }
   /** The Session's model takes its next step, which takes the messages steered in since its last. */
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, aliasSession, stop,
     jobs, subagents, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>
