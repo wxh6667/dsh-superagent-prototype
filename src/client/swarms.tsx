@@ -1,18 +1,23 @@
-/** Swarm launcher: the brief of a new swarm, active and completed swarms, and their Open and Finish actions. */
+/** Swarm launcher: a goal and a workspace up front, the rest of the brief under Advanced, and the active and completed swarms. */
 import { useEffect, useState } from 'react'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SwarmView } from './api.ts'
-import { Button, Dot, Icon, Input, Tag } from './controls.tsx'
+import { Button, DisclosureRow, Dot, Icon, Input, Tag } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { Field, Fields, numberOf } from './settings-kit.tsx'
 import { ConfirmButton, Hint, LoadState, Section, When } from './widgets.tsx'
 
 interface Draft {
-  title: string
   mission: string
+  workspace: string
+  /** True while the person types a path instead of choosing a registered workspace. */
+  manual: boolean
+  title: string
+  /** True once the person edits the title, so the mission no longer derives it. */
+  titleEdited: boolean
+  advanced: boolean
   acceptance: string
   scope: string
-  workspace: string
   verify: string
   prepare: string
   maxTasks: string
@@ -20,8 +25,13 @@ interface Draft {
   maxRounds: string
 }
 /** Defaults offered by the form; they match the SwarmManager's budget defaults. */
-const INITIAL: Draft = { title: '', mission: '', acceptance: '', scope: '', workspace: '', verify: 'scripts/verify.sh', prepare: '',
-  maxTasks: '20', maxWorkers: '2', maxRounds: '3' }
+const INITIAL: Draft = { mission: '', workspace: '', manual: false, title: '', titleEdited: false, advanced: false,
+  acceptance: '', scope: '', verify: 'scripts/verify.sh', prepare: '', maxTasks: '20', maxWorkers: '2', maxRounds: '3' }
+
+/** The title a mission derives: its first non-empty line, truncated to the stored limit. */
+export function titleOf(mission: string): string {
+  return (mission.split('\n').map(line => line.trim()).find(Boolean) ?? '').slice(0, LIMITS.swarm.title)
+}
 
 function SwarmRow({ swarm, onOpen, onFinish, busy }: {
   swarm: SwarmView; onOpen: (swarm: SwarmView) => void; onFinish: (swarm: SwarmView) => Promise<unknown>; busy: boolean
@@ -61,18 +71,25 @@ export function SwarmsPage() {
   const { data, error, reload } = usePoll(() => call('GET swarms'), [call])
   const [draft, setDraft] = useState(INITIAL)
   const fallback = data?.defaultWorkspace ?? ''
-  // Pre-fill the workspace once the local Source's repository is known, unless the person already typed one.
+  // Pre-fill the workspace once the local Source's repository is known, unless the person already chose one.
   useEffect(() => { if (fallback) setDraft(current => current.workspace ? current : { ...current, workspace: fallback }) }, [fallback])
   const edit = (next: Partial<Draft>) => setDraft(current => ({ ...current, ...next }))
+  // Registered long-term workspaces, plus the local Source's repository while it is not registered yet.
+  const options: { id: string; path: string; title: string }[] = [...(data?.workspaces ?? [])]
+  if (fallback && !options.some(item => item.path === fallback)) options.push({ id: fallback, path: fallback, title: '' })
 
   const create = useAction(async () => {
+    const mission = draft.mission.trim(), workspace = draft.workspace.trim()
+    if (!mission) throw new Error(t('swarmMissionRequired'))
+    if (!workspace) throw new Error(t('swarmWorkspaceRequired'))
     const maxTasks = numberOf(draft.maxTasks), maxWorkers = numberOf(draft.maxWorkers), maxRounds = numberOf(draft.maxRounds)
     if (maxTasks === null || maxWorkers === null || maxRounds === null
       || !Number.isInteger(maxTasks) || !Number.isInteger(maxWorkers) || !Number.isInteger(maxRounds)) {
       throw new Error(t('swarmBudgetRequired'))
     }
     const created = await call('POST swarms', { body: {
-      title: draft.title.trim(), mission: draft.mission.trim(), workspace: draft.workspace.trim(),
+      title: (draft.titleEdited ? draft.title.trim() : '') || titleOf(mission),
+      mission, workspace,
       verify: draft.verify.trim() || 'scripts/verify.sh', prepare: draft.prepare,
       ...draft.acceptance.trim() ? { acceptance: draft.acceptance.trim() } : {},
       ...draft.scope.trim() ? { scope: draft.scope.trim() } : {},
@@ -80,7 +97,7 @@ export function SwarmsPage() {
     } })
     const opened = await call('POST swarms/:id/open', { id: created.swarm.id })
     await openSession(opened.masterId)
-    setDraft(current => ({ ...INITIAL, workspace: current.workspace }))
+    setDraft(current => ({ ...INITIAL, workspace: current.workspace, manual: current.manual }))
   }, { reload })
   const open = useAction(async (swarm: SwarmView) => {
     const opened = await call('POST swarms/:id/open', { id: swarm.id })
@@ -96,48 +113,66 @@ export function SwarmsPage() {
     <Section title={t('swarmNew')} icon="plus">
       <form className="dt-form dt-block" onSubmit={event => { event.preventDefault(); void create.run() }}>
         <Fields disabled={create.busy}>
-          <Field label={t('swarmTitle')} hint={t('swarmTitleHint')}>
-            <Input required maxLength={LIMITS.swarm.title} value={draft.title}
-              onChange={event => edit({ title: event.target.value })} />
-          </Field>
           <Field label={t('swarmMission')} hint={t('swarmMissionHint')}>
             <textarea className="dt-textarea" rows={4} required maxLength={LIMITS.swarm.mission} value={draft.mission}
               onChange={event => edit({ mission: event.target.value })} />
           </Field>
-          <Field label={t('swarmAcceptance')} hint={t('swarmAcceptanceHint')}>
-            <textarea className="dt-textarea" rows={2} maxLength={LIMITS.swarm.acceptance} value={draft.acceptance}
-              onChange={event => edit({ acceptance: event.target.value })} />
+          <Field label={t('swarmWorkspace')} hint={t('swarmWorkspaceHint')}
+            note={!draft.manual && options.length === 0 ? t('swarmWorkspaceNone') : undefined}>
+            {draft.manual
+              ? <Input required pattern="/.*" className="dt-mono" spellCheck={false} value={draft.workspace}
+                  onChange={event => edit({ workspace: event.target.value })} />
+              : <select className="dt-select" required value={draft.workspace}
+                  onChange={event => edit({ workspace: event.target.value })}>
+                  <option value="">{t('swarmWorkspaceChoose')}</option>
+                  {options.map(item => <option key={item.id} value={item.path}>
+                    {item.title ? `${item.title} — ${item.path}` : item.path}
+                  </option>)}
+                </select>}
           </Field>
-          <Field label={t('swarmScope')} hint={t('swarmScopeHint')}>
-            <textarea className="dt-textarea" rows={2} maxLength={LIMITS.swarm.scope} value={draft.scope}
-              onChange={event => edit({ scope: event.target.value })} />
-          </Field>
-          <Field label={t('swarmWorkspace')} hint={t('swarmWorkspaceHint')}>
-            <Input required pattern="/.*" className="dt-mono" spellCheck={false} value={draft.workspace}
-              onChange={event => edit({ workspace: event.target.value })} />
-          </Field>
-          <Field label={t('swarmVerify')} hint={t('swarmVerifyHint')}>
-            <Input maxLength={LIMITS.swarm.verify} className="dt-mono" spellCheck={false} value={draft.verify}
-              onChange={event => edit({ verify: event.target.value })} />
-          </Field>
-          <Field label={t('swarmPrepare')} hint={t('swarmPrepareHint')}>
-            <textarea className="dt-textarea" rows={2} maxLength={LIMITS.prepareCommand} spellCheck={false} value={draft.prepare}
-              onChange={event => edit({ prepare: event.target.value })} />
-          </Field>
-          <div className="dt-grid3">
-            <Field label={t('swarmMaxTasks')}>
-              <Input type="number" required step={1} min={LIMITS.swarm.maxTasks.min} max={LIMITS.swarm.maxTasks.max}
-                value={draft.maxTasks} onChange={event => edit({ maxTasks: event.target.value })} />
-            </Field>
-            <Field label={t('swarmMaxWorkers')}>
-              <Input type="number" required step={1} min={LIMITS.swarm.maxWorkers.min} max={LIMITS.swarm.maxWorkers.max}
-                value={draft.maxWorkers} onChange={event => edit({ maxWorkers: event.target.value })} />
-            </Field>
-            <Field label={t('swarmMaxRounds')}>
-              <Input type="number" required step={1} min={LIMITS.swarm.maxRounds.min} max={LIMITS.swarm.maxRounds.max}
-                value={draft.maxRounds} onChange={event => edit({ maxRounds: event.target.value })} />
-            </Field>
+          <div className="dt-actions">
+            <Button variant="ghost" size="sm" icon={<Icon name={draft.manual ? 'filter' : 'plus'} size={14} />}
+              onClick={() => edit({ manual: !draft.manual })}>
+              {draft.manual ? t('swarmWorkspaceList') : t('swarmWorkspaceManual')}
+            </Button>
           </div>
+          <DisclosureRow icon={<Icon name="settings" size={14} />} title={t('swarmAdvanced')} open={draft.advanced}
+            onToggle={() => edit({ advanced: !draft.advanced })}>
+            <Field label={t('swarmTitle')} hint={t('swarmTitleAuto', { max: LIMITS.swarm.title })}>
+              <Input maxLength={LIMITS.swarm.title} placeholder={titleOf(draft.mission)} value={draft.title}
+                onChange={event => edit({ title: event.target.value, titleEdited: true })} />
+            </Field>
+            <Field label={t('swarmAcceptance')} hint={t('swarmAcceptanceHint')}>
+              <textarea className="dt-textarea" rows={2} maxLength={LIMITS.swarm.acceptance} value={draft.acceptance}
+                onChange={event => edit({ acceptance: event.target.value })} />
+            </Field>
+            <Field label={t('swarmScope')} hint={t('swarmScopeHint')}>
+              <textarea className="dt-textarea" rows={2} maxLength={LIMITS.swarm.scope} value={draft.scope}
+                onChange={event => edit({ scope: event.target.value })} />
+            </Field>
+            <Field label={t('swarmVerify')} hint={t('swarmVerifyHint')}>
+              <Input maxLength={LIMITS.swarm.verify} className="dt-mono" spellCheck={false} value={draft.verify}
+                onChange={event => edit({ verify: event.target.value })} />
+            </Field>
+            <Field label={t('swarmPrepare')} hint={t('swarmPrepareHint')}>
+              <textarea className="dt-textarea" rows={2} maxLength={LIMITS.prepareCommand} spellCheck={false} value={draft.prepare}
+                onChange={event => edit({ prepare: event.target.value })} />
+            </Field>
+            <div className="dt-grid3">
+              <Field label={t('swarmMaxTasks')}>
+                <Input type="number" required step={1} min={LIMITS.swarm.maxTasks.min} max={LIMITS.swarm.maxTasks.max}
+                  value={draft.maxTasks} onChange={event => edit({ maxTasks: event.target.value })} />
+              </Field>
+              <Field label={t('swarmMaxWorkers')}>
+                <Input type="number" required step={1} min={LIMITS.swarm.maxWorkers.min} max={LIMITS.swarm.maxWorkers.max}
+                  value={draft.maxWorkers} onChange={event => edit({ maxWorkers: event.target.value })} />
+              </Field>
+              <Field label={t('swarmMaxRounds')}>
+                <Input type="number" required step={1} min={LIMITS.swarm.maxRounds.min} max={LIMITS.swarm.maxRounds.max}
+                  value={draft.maxRounds} onChange={event => edit({ maxRounds: event.target.value })} />
+              </Field>
+            </div>
+          </DisclosureRow>
         </Fields>
         <div className="dt-actions">
           <Button type="submit" variant="primary" disabled={create.busy} icon={<Icon name="plus" size={14} />}>

@@ -84,12 +84,17 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
   admissionContextTimeoutMs: 15000 }
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
+/** A registered workspace as `GET swarms` offers it to the launcher. */
+type RegisteredWorkspace = ApiResponse<'GET swarms'>['workspaces'][number]
+/** Build one registered workspace for the launcher's dropdown. */
+export const registeredWorkspace = (path: string, title = ''): RegisteredWorkspace =>
+  ({ id: path as RegisteredWorkspace['id'], path, title })
 export interface PanelServer {
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
   /** Swarms newest first, as `GET swarms` returns them, and the local Source's pre-filled workspace. */
-  swarms: SwarmView[]; defaultWorkspace: string
+  swarms: SwarmView[]; workspaces: RegisteredWorkspace[]; defaultWorkspace: string
   /** When set, open and finish refuse with this message. */
   swarmError?: string
   prompts: PromptsView
@@ -238,6 +243,7 @@ function initial(): PanelServer {
     swarms: [swarmSummary('swarm-active', 'active', { title: '登录回归', mission: '修好登录页的回归' }),
       swarmSummary('swarm-done', 'completed', { title: '已完成的任务', mission: '整理文档' }),
       swarmSummary('legacy', 'completed', { title: '历史记录', mission: '迁移前的工单', masterSessionId: '', legacy: true })],
+    workspaces: [registeredWorkspace('/srv/repo', 'Local repository'), registeredWorkspace('/srv/other', 'Other repository')],
     defaultWorkspace: '/srv/repo',
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: [],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
@@ -279,7 +285,7 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
-  'GET swarms': { answer: () => ({ items: server.swarms, workspaces: [], defaultWorkspace: server.defaultWorkspace, legacyMasterId: 'master' }) },
+  'GET swarms': { answer: () => ({ items: server.swarms, workspaces: server.workspaces, defaultWorkspace: server.defaultWorkspace, legacyMasterId: 'master' }) },
   'POST swarms': { body: true, answer: ({ body }) => {
     const id = `swarm-${server.swarms.length + 1}`
     const swarm: SwarmView = { id, title: body.title, mission: body.mission, ...body.acceptance ? { acceptance: body.acceptance } : {},

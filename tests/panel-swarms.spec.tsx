@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// The Swarm launcher, the New swarm brief, and Open and Finish.
+// The Swarm launcher: a goal and a workspace up front, the rest under Advanced, and the active and completed swarms.
 import { expect, it } from 'vitest'
 import { zh } from '../src/client/locales.ts'
 import { usePanel, mount, settle, all, tab, click, type, text, field, at } from './fixtures/panel.tsx'
@@ -7,6 +7,7 @@ import { server } from './fixtures/panel-server.ts'
 
 usePanel()
 const launcher = async () => { at({ page: 'swarms' }); await mount() }
+const posted = () => server.requests.find(request => request.path === 'swarms' && request.method === 'POST')?.body as Record<string, unknown>
 
 it('lists active and completed swarms with their mission, workspace, status and master, marking legacy records read-only', async () => {
   await launcher()
@@ -24,24 +25,57 @@ it('lists active and completed swarms with their mission, workspace, status and 
   expect(all('.dt-row-buttons button').map(button => button.textContent)).toEqual([zh.swarmOpen, zh.swarmFinish])
 })
 
-it('posts the brief, opens the new swarm and leaves the form ready for the next one', async () => {
+it('asks for only a goal and a workspace, and keeps the rest of the brief under Advanced', async () => {
   await launcher()
-  expect(field<HTMLInputElement>(zh.swarmWorkspace).value).toBe('/srv/repo')
-  await type(field<HTMLInputElement>(zh.swarmTitle), '导航修复')
-  await type(field<HTMLTextAreaElement>(zh.swarmMission), '修好导航栏')
-  await type(field<HTMLTextAreaElement>(zh.swarmAcceptance), '回归通过')
-  await type(field<HTMLInputElement>(zh.swarmMaxTasks), '8')
-  await type(field<HTMLInputElement>(zh.swarmWorkspace), '/srv/other')
+  expect(field<HTMLTextAreaElement>(zh.swarmMission).required).toBe(true)
+  // The workspace is a dropdown of registered workspaces, with the local repository selected by default.
+  expect(field<HTMLSelectElement>(zh.swarmWorkspace).value).toBe('/srv/repo')
+  expect(all('select.dt-select option').map(option => option.textContent)).toEqual([zh.swarmWorkspaceChoose,
+    'Local repository — /srv/repo', 'Other repository — /srv/other'])
+  // Acceptance, the title and the budget stay folded away until Advanced is opened.
+  expect(text()).not.toContain(zh.swarmAcceptance)
+  expect(text()).not.toContain(zh.swarmTitle)
+  await click(zh.swarmAdvanced)
+  expect(text()).toContain(zh.swarmAcceptance)
+  expect(text()).toContain(zh.swarmTitle)
+  expect(text()).toContain(zh.swarmMaxTasks)
+})
+
+it('posts the goal with the chosen workspace, derives the title and leaves the form ready for the next swarm', async () => {
+  await launcher()
+  await type(field<HTMLTextAreaElement>(zh.swarmMission), '修好导航栏\n第二行也忽略')
   await click(zh.swarmCreate)
-  expect(server.requests.find(request => request.path === 'swarms' && request.method === 'POST')?.body).toMatchObject({
-    title: '导航修复', mission: '修好导航栏', acceptance: '回归通过', workspace: '/srv/other', verify: 'scripts/verify.sh', prepare: '',
-    budget: { maxTasks: 8, maxWorkers: 2, maxRounds: 3 },
-  })
+  // The title comes from the mission's first line, truncated to the stored limit.
+  expect(posted()).toMatchObject({ title: '修好导航栏', mission: '修好导航栏\n第二行也忽略', workspace: '/srv/repo',
+    verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3 } })
   expect(server.requests.filter(request => request.method === 'POST' && /^swarms\/.+\/open$/.test(request.path))).toHaveLength(1)
   expect(server.opened).toEqual(['orchestrator-swarm-4'])
-  expect(field<HTMLInputElement>(zh.swarmTitle).value).toBe('')
   expect(field<HTMLTextAreaElement>(zh.swarmMission).value).toBe('')
+  expect(field<HTMLSelectElement>(zh.swarmWorkspace).value).toBe('/srv/repo')
+})
+
+it('chooses a registered workspace, and types an unregistered one after switching to manual entry', async () => {
+  await launcher()
+  await type(field<HTMLSelectElement>(zh.swarmWorkspace), '/srv/other')
+  expect(field<HTMLSelectElement>(zh.swarmWorkspace).value).toBe('/srv/other')
+  await click(zh.swarmWorkspaceManual)
   expect(field<HTMLInputElement>(zh.swarmWorkspace).value).toBe('/srv/other')
+  await type(field<HTMLInputElement>(zh.swarmWorkspace), '/srv/unregistered')
+  await type(field<HTMLTextAreaElement>(zh.swarmMission), '任意目标')
+  await click(zh.swarmCreate)
+  expect(posted()).toMatchObject({ workspace: '/srv/unregistered' })
+})
+
+it('edits the derived title and the rest of the brief under Advanced', async () => {
+  await launcher()
+  await type(field<HTMLTextAreaElement>(zh.swarmMission), '目标首行\n更多细节')
+  await click(zh.swarmAdvanced)
+  expect(field<HTMLInputElement>(zh.swarmTitle).getAttribute('placeholder')).toBe('目标首行')
+  await type(field<HTMLInputElement>(zh.swarmTitle), '自定义标题')
+  await type(field<HTMLTextAreaElement>(zh.swarmAcceptance), '回归通过')
+  await type(field<HTMLInputElement>(zh.swarmMaxTasks), '8')
+  await click(zh.swarmCreate)
+  expect(posted()).toMatchObject({ title: '自定义标题', acceptance: '回归通过', budget: { maxTasks: 8, maxWorkers: 2, maxRounds: 3 } })
 })
 
 it('opens an active swarm master through the panel', async () => {

@@ -28,7 +28,11 @@ export interface SwarmCreateInput {
  */
 export interface SwarmHost {
   readonly store: Pick<Store, 'swarms' | 'tickets'>
-  readonly sessions: { ensureMaster(id: string, cwd: string, title: string, swarmId?: string): Promise<unknown> }
+  readonly sessions: {
+    ensureMaster(id: string, cwd: string, title: string, swarmId?: string): Promise<unknown>
+    /** Steers the brief into the swarm's master Session, waking it to start; `requestId` keeps the delivery idempotent. */
+    relay(requestId: string, text: string, target?: { swarmId?: string }): void
+  }
   readonly workspace: { archiveSession(id: string): Promise<void>; unarchiveSession(id: string): Promise<void> }
   readonly workspaces: Pick<SwarmWorkspaces, 'cleanup' | 'reconcile'>
   /** Receives a startup repair or cleanup failure for one swarm without stopping the work on the others. */
@@ -52,6 +56,13 @@ function budgetOf(input: Partial<SwarmBudget> | undefined): SwarmBudget {
       throw new Error(`${field} must be an integer from ${min} to ${max}; got ${value}`)
   }
   return budget
+}
+
+/** The first message of a swarm's master Session, as the relay channel carries it: the brief the person supplied, and nothing else. */
+export function swarmBrief(swarm: Pick<Swarm, 'mission' | 'workspace' | 'acceptance' | 'scope' | 'verify' | 'budget'>): string {
+  return JSON.stringify({ kind: 'swarm_brief', goal: swarm.mission, workspace: swarm.workspace,
+    ...swarm.acceptance ? { acceptance: swarm.acceptance } : {}, ...swarm.scope ? { scope: swarm.scope } : {},
+    validation: swarm.verify, budget: swarm.budget })
 }
 
 /**
@@ -97,6 +108,8 @@ export class SwarmManager {
       createdAt: new Date().toISOString(),
     }
     this.host.store.swarms.save(swarm)
+    // The master starts from the brief the person supplied; the durable relay wakes it to plan against the goal.
+    this.host.sessions.relay(`swarm-brief:${id}`, swarmBrief(swarm), { swarmId: id })
     return swarm
   }
 

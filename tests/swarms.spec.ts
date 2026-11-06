@@ -50,13 +50,14 @@ function fake(fail?: (sessionId: string) => boolean) {
   })
   const archiveSession = vi.fn(async (id: string) => { archived.push(id) })
   const unarchiveSession = vi.fn(async (id: string) => { unarchived.push(id) })
+  const relay = vi.fn((_requestId: string, _text: string, _target?: { swarmId?: string }) => {})
   const report = vi.fn((swarm: Swarm, error: unknown) => { reported.push({ swarm, error }) })
   const workspaces = {
     cleanup: vi.fn(async (id: string) => { cleaned.push(id); return { removed: [], failed: [] } }),
     reconcile: vi.fn(async (swarms: readonly Swarm[]) => { reconciled.push([...swarms]) }),
   }
-  const manager = new SwarmManager({ store, sessions: { ensureMaster }, workspace: { archiveSession, unarchiveSession }, workspaces, report })
-  return { manager, ensureMaster, archiveSession, unarchiveSession, workspaces, report, ensured, unarchived, archived, cleaned, reconciled, reported }
+  const manager = new SwarmManager({ store, sessions: { ensureMaster, relay }, workspace: { archiveSession, unarchiveSession }, workspaces, report })
+  return { manager, ensureMaster, relay, archiveSession, unarchiveSession, workspaces, report, ensured, unarchived, archived, cleaned, reconciled, reported }
 }
 
 const brief = (fields: Partial<SwarmCreateInput> = {}): SwarmCreateInput => ({ title: 'Ship it', mission: 'Do the thing', workspace, ...fields })
@@ -73,7 +74,7 @@ it('refuses a missing, non-absolute or non-Trellis workspace without saving a sw
 })
 
 it('creates the master and saves an active swarm with the supplied brief and budget defaults', async () => {
-  const { manager, ensured } = fake()
+  const { manager, ensured, relay } = fake()
   const created = await manager.create(brief({ acceptance: 'It works', scope: 'the repo', budget: { maxTasks: 4 } }))
   expect(created).toMatchObject({ title: 'Ship it', mission: 'Do the thing', acceptance: 'It works', scope: 'the repo', workspace,
     verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 }, status: 'active' })
@@ -83,13 +84,19 @@ it('creates the master and saves an active swarm with the supplied brief and bud
   expect(ensured).toEqual([{ id: created.masterSessionId, cwd: workspace, title: '[swarm] Ship it', swarmId: created.id }])
   expect(store.swarms.get(created.id)).toEqual(created)
   expect(store.swarms.active().map(item => item.id)).toEqual([created.id])
+  // The master's first message is the brief, delivered once under a swarm-scoped request id.
+  expect(relay).toHaveBeenCalledWith(`swarm-brief:${created.id}`, JSON.stringify({ kind: 'swarm_brief', goal: 'Do the thing',
+    workspace, acceptance: 'It works', scope: 'the repo', validation: 'scripts/verify.sh',
+    budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } }), { swarmId: created.id })
 })
 
 it('leaves no swarm behind when creating its master fails, and removes the workspace registration it added', async () => {
-  const { manager, cleaned } = fake(() => true)
+  const { manager, cleaned, relay } = fake(() => true)
   await expect(manager.create(brief())).rejects.toThrow('cannot ensure')
   expect(store.swarms.list()).toEqual([])
   expect(cleaned).toHaveLength(1)
+  // No swarm means no master and no brief.
+  expect(relay).not.toHaveBeenCalled()
 })
 
 it('refuses a create at the active-swarm cap before creating a master', async () => {
@@ -235,7 +242,7 @@ it('keeps the person\'s workspace and removes the swarm\'s worktree registration
   const workspaces = new SwarmWorkspaces({ store, registry })
   const manager = new SwarmManager({ store,
     // The master Session registers the chosen workspace; each worker registers its own worktree Session directory.
-    sessions: { ensureMaster: async (_id, cwd, _title, swarmId) => { await workspaces.ensure(cwd, swarmId) } },
+    sessions: { ensureMaster: async (_id, cwd, _title, swarmId) => { await workspaces.ensure(cwd, swarmId) }, relay: () => {} },
     workspace: { archiveSession: async () => {}, unarchiveSession: async () => {} }, workspaces })
   const created = await manager.create(brief())
   await workspaces.ensure('/state/work/ticket-1', created.id)

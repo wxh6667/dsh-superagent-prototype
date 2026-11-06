@@ -358,12 +358,13 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `src/sources/local.ts` | The local Source kind: configuration, admission, environment variables and display facts for local requests |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
-| `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
+| `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager, and the Swarm task status in the conversation header |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
-| `src/client/swarms.tsx` | The Swarm launcher: the New swarm brief, active and completed swarms with their workspace, budget and master, and Open and Finish |
+| `src/client/swarms.tsx` | The Swarm launcher: a goal and a workspace up front, the rest of the brief under Advanced with the title derived from the goal, active and completed swarms with their workspace, budget and master, and Open and Finish |
+| `src/client/swarm-status.tsx` | The task status of the Swarm whose master Session the conversation shows: running, waiting and just-ended counts with the latest change, in the conversation header |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
@@ -420,7 +421,7 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `tests/trellis.spec.ts` | The Trellis adapter: parent/child creation and artifacts, session-scoped start, archive, current task, and task-path validation |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
-| `tests/panel-panel.spec.tsx`, `tests/panel-overview.spec.tsx`, `tests/panel-source.spec.tsx`, `tests/panel-trigger.spec.tsx`, `tests/panel-eval.spec.tsx`, `tests/panel-execution.spec.tsx`, `tests/panel-settings.spec.tsx`, `tests/panel-prompts.spec.tsx`, `tests/panel-deployment.spec.tsx`, `tests/panel-swarms.spec.tsx` | The panel's search and shell, Overview, the local Source and its settings, Threads and Triggers, Decisions and the local Policy, Tickets and Execution settings, settings drafts and history, Prompts, Deployment, and the Swarm launcher |
+| `tests/panel-panel.spec.tsx`, `tests/panel-overview.spec.tsx`, `tests/panel-source.spec.tsx`, `tests/panel-trigger.spec.tsx`, `tests/panel-eval.spec.tsx`, `tests/panel-execution.spec.tsx`, `tests/panel-settings.spec.tsx`, `tests/panel-prompts.spec.tsx`, `tests/panel-deployment.spec.tsx`, `tests/panel-swarms.spec.tsx`, `tests/panel-swarm-status.spec.tsx` | The panel's search and shell, Overview, the local Source and its settings, Threads and Triggers, Decisions and the local Policy, Tickets and Execution settings, settings drafts and history, Prompts, Deployment, the Swarm launcher, and the Swarm task status in the conversation header |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |

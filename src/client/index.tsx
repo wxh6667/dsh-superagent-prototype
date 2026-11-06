@@ -14,6 +14,7 @@ import { openKnownSession, SessionNavigationError } from '../navigation.ts'
 import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
+import { SwarmStatus } from './swarm-status.tsx'
 import type { T } from './text.ts'
 
 type ClientContext = Context & { sessions: ISessions }
@@ -55,4 +56,8 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => t('panel'), locale: NS }, HammerIcon))
   ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: `${ENTRY}#${ENTRY}`, locale: NS },
     (props: PluginConfigViewProps & { t: T }) => <PluginConfig t={props.t} view={props.view} form={props.form} />))
+  // The Swarm's task status rides the conversation header's additive action list, so it never replaces the header itself.
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions', id: 'swarm-status', order: 20, locale: NS },
+    (props: { sessionId: string; t: T }) => <SwarmStatus sessionId={props.sessionId} t={props.t} />))
 }

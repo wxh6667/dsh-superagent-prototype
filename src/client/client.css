@@ -365,3 +365,7 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-diff-fold { color: var(--dsw-alias-label-caption); font-style: italic; }
 .dt-compare { margin-left: auto; }
 .dt-field-segmented { max-width: 240px; }
+/* The Swarm's task status in the conversation header; a Session that owns no active Swarm renders nothing. */
+.dt-swarm-status { display: inline-flex; align-items: center; gap: 6px; max-width: 360px; min-width: 0; padding: 1px 9px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 999px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.dt-swarm-status-counts { flex: none; }
+.dt-swarm-status-latest { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dsw-alias-label-tertiary); }
