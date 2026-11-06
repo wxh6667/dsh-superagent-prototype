@@ -16,7 +16,7 @@ import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
-import { resultRelay } from '../app/notices.ts'
+import { resultRelay, type Relay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
@@ -434,14 +434,14 @@ export class DshExecutor implements Executor {
     if (!ticket || !liveTicket(ticket) || latestAssignment(ticket)?.id !== assignmentId) return
     this.failed(ticketId, String(error))
   }
-  /** Records a `failed` report on the ticket and relays the failure to the main Session in one transaction. */
+  /** Records a `failed` report on the ticket and relays the failure to the Session owning it in one transaction. */
   private failed(ticketId: string, summary: string): void {
     this.host.store.atomic(() => {
       const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
       this.relay(resultRelay(updated, 'failed', summary))
     })
   }
-  private relay({ id, text, swarmId }: { id: string; text: string; swarmId?: string }): void { this.host.sessions.relay(id, text, swarmId) }
+  private relay({ id, text, ...target }: Relay): void { this.host.sessions.relay(id, text, target) }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')

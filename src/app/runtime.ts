@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type DomainEvent, type EngineForSettings, type OutboundMessage, type ReceiveResult, type Swarm, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, reasonText, type EngineForSettings, type OutboundMessage, type ReceiveResult, type Swarm, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { localKind } from '../sources/local.ts'
@@ -127,8 +127,8 @@ export class Runtime extends Service implements SourceHost {
       const swarmWorkspaces = this.swarmWorkspaces = new SwarmWorkspaces({ store, registry: ctx.workspaceRegistry,
         report: error => ctx.logger.warn('dsh-superagent could not clean up a swarm workspace: %s', String(error)) })
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
-        // Ticket-related messages target their swarm's master; the legacy master is the fallback for absent or unknown swarms.
-        masterFor: swarmId => this.swarms.masterFor(swarmId) ?? (swarmId ? undefined : this.masterId),
+        // Ticket-related messages target the active Swarm's master; `Sessions` falls back to the Session that dispatched the ticket.
+        masterFor: swarmId => this.swarms.masterFor(swarmId),
         lifetime: this.lifetime, commitGuard: (execution, sessionId) => this.commitGuard(execution, sessionId),
         closing: () => this.closing(), environment, workspaces: swarmWorkspaces,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent, this.swarms.swarmOf(agent.id)) })
@@ -150,20 +150,26 @@ export class Runtime extends Service implements SourceHost {
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox,
-        // A local ticket carries its origin trigger's swarm so its worker runs against that swarm; a legacy or remote trigger names none.
+        // A local ticket carries its origin trigger's swarm and dispatching Session, so its worker runs against that swarm and its
+        // reports return to where it was dispatched; a legacy or proactive trigger names neither.
         prepareTicket: (ticket, outcome) => {
-          const swarmId = store.triggers.get(ticket.origin.triggerId)?.meta.swarmId
-          return executor.prepare(typeof swarmId === 'string' ? { ...ticket, swarmId } : ticket, outcome)
+          const meta = store.triggers.get(ticket.origin.triggerId)?.meta
+          const swarmId = meta?.swarmId, originSessionId = meta?.originSessionId
+          return executor.prepare({
+            ...ticket,
+            ...(typeof swarmId === 'string' ? { swarmId } : {}),
+            ...(typeof originSessionId === 'string' ? { originSessionId } : {}),
+          }, outcome)
         },
         emit: event => {
-          // Notify the owning swarm's master Session only about domain events it did not initiate itself.
-          const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
-          if (notice) sessions.notify(notice[0], notice[1], notice[2], this.swarmIdOf(event))
+          // Notify the owning Session only about domain events it did not initiate itself.
+          const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id), id => store.triggers.get(id))
+          if (notice) sessions.notify(...notice)
           // A person's message that reached an open ticket is the ticket's; the main Session hears of it in the same transaction,
           // and of one for an ended ticket once it resumes, unless it routed the message there itself.
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
-          if (followup) sessions.relay(followup.id, followup.text, followup.swarmId)
+          if (followup) sessions.relay(followup.id, followup.text, followup)
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
@@ -174,7 +180,7 @@ export class Runtime extends Service implements SourceHost {
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, resources,
-        local: () => setup.configured() ? setup.deployment.local : undefined, trellis: this.trellis, trellisFor: swarm => this.trellisFor(swarm), masterId,
+        local: () => setup.configured() ? setup.deployment.local : undefined, trellis: this.trellis, trellisFor: swarm => this.trellisFor(swarm),
         receive: trigger => engine.receive(trigger),
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
@@ -210,27 +216,23 @@ export class Runtime extends Service implements SourceHost {
     const swarm = ticket.swarmId ? this.swarms.get(ticket.swarmId) : undefined
     return swarm && !swarm.legacy ? swarm.prepare : this.store.settings().executor.prepare
   }
-  /** The owning swarm of a ticket-related event notice: its ticket's swarm, or the trigger's swarm metadata; absent for legacy. */
-  private swarmIdOf(event: DomainEvent): string | undefined {
-    if (event.type === 'ticket.ended' || event.type === 'thread.unsubscribed') return this.store.tickets.get(event.data.ticketId)?.swarmId
-    if (event.type === 'trigger.requeued') {
-      const swarmId = this.store.triggers.get(event.data.triggerId)?.meta.swarmId
-      return typeof swarmId === 'string' ? swarmId : undefined
-    }
-    return undefined
-  }
-  /** Delivers a local Source message into the owning swarm's master Session: a question steers, an acknowledgement or result is a notice. */
+  /** Delivers a local Source message into the Session that owns its ticket: a question steers, an acknowledgement or result is a notice. */
   private async deliverLocal(message: OutboundMessage): Promise<'sent' | 'gone' | 'waiting'> {
     const ticket = message.ticketId ? this.store.tickets.get(message.ticketId) : undefined
-    // The ticket's swarm master, or the legacy master when the ticket has no swarm (or an unknown one).
-    const master = this.swarms.masterFor(ticket?.swarmId) ?? this.masterId
+    // The ticket's swarm master, the Session that dispatched it, or the legacy master when it records neither.
+    const target = { swarmId: ticket?.swarmId, ticketId: message.ticketId }
+    const master = this.sessions.messageTarget(target)
+    if (!master) {
+      this.ctx.logger.warn('dsh-superagent could not deliver the local message %s: no Session owns ticket %s', message.id, message.ticketId)
+      return 'gone'
+    }
     const question = message.kind === 'reply' && ticket?.attention?.question === message.text
     if (question) {
       try { await this.sessions.prompt(master, `local:${message.id}`, message.text, 'steer'); return 'sent' }
       catch { return 'waiting' }
     }
     const summary = message.kind === 'acknowledgement' ? 'local acknowledgement' : 'local result'
-    this.sessions.notify(`local:${message.id}`, { text: message.text, kind: message.kind, ticket_id: message.ticketId ?? null }, summary, ticket?.swarmId)
+    this.sessions.notify(`local:${message.id}`, { text: message.text, kind: message.kind, ticket_id: message.ticketId ?? null }, summary, target)
     return 'sent'
   }
   /** Refuses a main-Session commit unless the calling master's swarm (or the legacy local repository) has an in-progress Trellis task. */

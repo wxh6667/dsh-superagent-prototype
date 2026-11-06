@@ -174,8 +174,8 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
 | `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
-| `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
-| `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
+| `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the turn of the Session owning it: the active Swarm's master, else the Session that dispatched the Ticket, else the legacy master; one with no owner stays queued and errors in health | 1, in queue order | 2 s doubling to 60 s |
+| `notice` | Sessions | Injects a notice into the Session owning it without waking it, by the same order; a Session that does not exist is logged, one with no owner stays queued and errors in health | 1, in queue order | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
@@ -245,7 +245,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 | Glue | Translates |
 | --- | --- |
 | `src/app/runtime.ts` | The composition root: builds the parts with the interfaces they use, registers the routes and the Source host, and starts and stops dsh-superagent |
-| `src/app/notices.ts` | Domain events and worker reports into notices and relays for the main Session |
+| `src/app/notices.ts` | Domain events and worker reports into notices and relays for the Session owning the Ticket |
 | `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
@@ -308,7 +308,7 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
-| `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
+| `src/app/notices.ts` | A Ticket's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
 | `src/app/migration.ts` | The schema 10 through 13 migrations: writes every stored record in its current shape, adds swarm ownership, and removes records of the Sources this build no longer has, after copying the database to `backups/` |
@@ -411,7 +411,8 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `tests/swarm.spec.ts` | The Swarm repository and the schema 11 to 12 migration: a fresh database, the legacy swarm, owned historical Tickets and idempotent reopen |
 | `tests/swarms.spec.ts` | The SwarmManager on a real Store: creation validation, master ensure/unarchive, listing, the open and finish lifecycle, workspace cleanup that never blocks completion, startup repair and cleanup retry, and master resolution for active tickets |
 | `tests/swarm-workspaces.spec.ts` | `SwarmWorkspaces`: new versus reused registrations, cleanup failures kept for a retry, user and local workspaces retained, the long-term list, and completed or orphaned leftovers cleaned at startup |
-| `tests/notices.spec.ts` | Notices and relays carry their owning swarm: result, report/attention and follow-up relays, the trigger-metadata fallback, and the legacy empty case |
+| `tests/notices.spec.ts` | Notices and relays carry their owning Ticket and swarm: result, report/attention and follow-up relays, the trigger-metadata fallback, and the legacy empty case |
+| `tests/report-delivery.spec.ts` | Where a Ticket's reports, attention and end notice go: the dispatching Session, a Swarm's master ahead of it, the legacy master for older Tickets, and the health or log of a message with no owner |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
@@ -558,7 +559,7 @@ The names `event/`, `task/` and `observation/` of earlier versions still resolve
 
 ### Messages delivered to Sessions
 
-These messages are steered into the main Session's turn:
+These messages are steered into the turn of the Session that owns their work: the active Swarm's master, else the Session that dispatched the Ticket, else the legacy master:
 
 | Message | Content |
 | --- | --- |
@@ -567,7 +568,7 @@ These messages are steered into the main Session's turn:
 | `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters; `chars` and a read pointer when truncated |
 | `worker_attention` | Ticket card carrying the question |
 
-Other notices are injected without waking the main Session: `ticket_ended`, `settings_saved`, prompt saves, Trigger requeues, dropped Subscriptions and context follows. A settings notice names the block, changed paths and `read: settings/<block>`. The main Session receives no redundant notice for a save, requeue, unsubscribe or attach it performed itself.
+Other notices are injected without waking that Session: `ticket_ended`, `settings_saved`, prompt saves, Trigger requeues, dropped Subscriptions and context follows. A settings notice names the block, changed paths and `read: settings/<block>`. A Session receives no redundant notice for a save, requeue, unsubscribe or attach it performed itself.
 
 Workers receive assignments and Inputs inline. The first message includes the title, up to 1,500 characters of assignment text and the source Trigger card. Inputs carry a Trigger card with up to 600 characters and `replies_to`, or plain Input text. Read pointers appear only for truncated content.
 

@@ -117,11 +117,12 @@ describe('main Session local tools', () => {
     ] }, new AbortController().signal)
     expect(host.receive).toHaveBeenCalledTimes(2)
     expect(host.engine.decide).toHaveBeenCalledTimes(2)
+    // The dispatching Session owns the thread and the Ticket's reports when no Swarm does.
     expect(host.receive).toHaveBeenNthCalledWith(1, expect.objectContaining({ source: 'local', human: true, addressed: 'direct',
-      threads: [{ source: 'local', id: 'local:session-1:11-05-local-work' }], channel: expect.objectContaining({ source: 'local' }),
-      meta: { task_dir: first, repository: repo } }))
-    expect(host.receive).toHaveBeenNthCalledWith(2, expect.objectContaining({ threads: [{ source: 'local', id: 'local:session-1:11-05-other-work' }],
-      meta: { task_dir: second, repository: repo } }))
+      threads: [{ source: 'local', id: 'local:master:11-05-local-work' }], channel: expect.objectContaining({ source: 'local' }),
+      meta: { task_dir: first, repository: repo, originSessionId: 'master' } }))
+    expect(host.receive).toHaveBeenNthCalledWith(2, expect.objectContaining({ threads: [{ source: 'local', id: 'local:master:11-05-other-work' }],
+      meta: { task_dir: second, repository: repo, originSessionId: 'master' } }))
     expect(host.engine.decide).toHaveBeenNthCalledWith(1, expect.any(String), expect.objectContaining({ kind: 'accept', title: 'Local work',
       name: 'local-work', reason: { code: 'explicitRouted' } }))
     expect(host.engine.decide).toHaveBeenNthCalledWith(2, expect.any(String), expect.objectContaining({ title: 'Other work', name: 'other-work' }))
@@ -162,7 +163,7 @@ describe('main Session local tools', () => {
       source: 'local', human: true, addressed: 'direct',
       threads: [{ source: 'local', id: 'local:swarm-1:11-05-swarm-work' }],
       channel: expect.objectContaining({ source: 'local', thread: 'local:swarm-1:11-05-swarm-work' }),
-      meta: { task_dir: taskDir, repository: workspace, swarmId: 'swarm-1' },
+      meta: { task_dir: taskDir, repository: workspace, swarmId: 'swarm-1', originSessionId: 'master' },
     }))
     expect(host.engine.decide).toHaveBeenCalledTimes(1)
     expect(host.engine.decide).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: 'accept', title: 'Swarm work', name: 'swarm-work' }))

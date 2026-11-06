@@ -33,7 +33,6 @@ export interface MainToolsHost {
   readonly trellis: Pick<Trellis, 'plan' | 'archive'>
   /** The Trellis the calling swarm plans and archives against; without it, one bound to the swarm's own workspace is built. */
   readonly trellisFor?: (swarm: Swarm) => Pick<Trellis, 'plan' | 'archive'>
-  readonly masterId: string
   /** Stores a local Trigger through the Engine; the dispatch tool is its Source. */
   readonly receive: (trigger: Trigger) => ReceiveResult
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
@@ -203,13 +202,15 @@ export function mainTools(host: MainToolsHost, agent: Agent, swarm?: Swarm): Too
         for (const task of args.tasks) {
           try {
             const taskDir = localTaskDir(workspace, task.task_dir)
-            const thread = `local:${swarm?.id ?? host.masterId}:${basename(taskDir)}`
+            // The thread belongs to the Session the request was made in: the Swarm's, or the dispatching one when no Swarm owns it.
+            const thread = `local:${swarm?.id ?? agent.id}:${basename(taskDir)}`
             const trigger: Trigger = {
               id: key('trigger', 'local', taskDir, thread), source: 'local', threads: [{ source: 'local', id: thread }],
               actor: { source: 'local', id: local.actor }, human: true, addressed: 'direct', at: new Date().toISOString(),
               text: `${task.title}\n\nTrellis task: ${taskDir}\nRead the task's prd.md, design.md and implement.md before working.`,
               channel: { source: 'local', thread, address: { thread } },
-              meta: { task_dir: taskDir, repository: workspace, ...(swarm ? { swarmId: swarm.id } : {}) },
+              // The dispatching Session owns the ticket's reports unless a Swarm does; the Ticket records it (see `prepareTicket`).
+              meta: { task_dir: taskDir, repository: workspace, originSessionId: agent.id, ...(swarm ? { swarmId: swarm.id } : {}) },
             }
             const received = host.receive(trigger)
             if (received === 'filtered') {

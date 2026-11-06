@@ -47,14 +47,14 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       execute: async args => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended; do not resume it')
-        // Record the report and queue the relay atomically, so an invalid report leaves no partial state and a recorded report always reaches the main Session.
+        // Record the report and queue the relay atomically, so an invalid report leaves no partial state and a recorded report always reaches the Session owning the ticket.
         return host.store.atomic(() => {
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
           const relay = reportRelay(updated, report)
-          if (relay) host.sessions.relay(relay.id, relay.text, relay.swarmId)
+          if (relay) { const { id, text, ...target } = relay; host.sessions.relay(id, text, target) }
           const notification = relay ? 'orchestrator' : 'internal_only'
           return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
         })

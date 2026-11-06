@@ -1,17 +1,22 @@
-/** Formats background notices and steering relays delivered to the main Session via the effect queue. */
+/** Formats background notices and steering relays delivered to the Session that owns a ticket, through the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type WorkerReport } from '../core/index.ts'
+import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { repliedTo } from './links.ts'
 import type { Store } from './store.ts'
 import { ticketCard } from './cards.ts'
 
+/** The Session a ticket-related message belongs to: the master of the active Swarm that owns it, else the Session that dispatched it. */
+export interface MessageTarget { swarmId?: string; ticketId?: string }
+/** A target with only the fields that name something, so a message carries no empty ownership. */
+const named = (target?: MessageTarget): MessageTarget => ({ ...target?.swarmId ? { swarmId: target.swarmId } : {},
+  ...target?.ticketId ? { ticketId: target.ticketId } : {} })
 /**
- * A background notice tuple for the main Session: `[name, value, summary]`, where `name` is the coalescing key in
+ * A background notice tuple for a Session: `[name, value, summary, target]`, where `name` is the coalescing key in
  * `Effects` (a newer notice with the same `name` overwrites an unsent waiting one, rather than permanently deduplicating future notices).
  */
-export type Notice = readonly [name: string, value: Record<string, unknown>, summary: string, swarmId?: string]
+export type Notice = readonly [name: string, value: Record<string, unknown>, summary: string, target?: MessageTarget]
 /** Builds a notice for a saved prompt configuration revision, coalescing under `'prompts'`. */
 export const promptsNotice = (revision: number): Notice =>
   ['prompts', { prompt_config_saved: revision, effect: 'next-request', read: `prompts/${revision}` }, `Prompt configuration saved (revision ${revision})`]
@@ -36,27 +41,31 @@ function brief(ticket: Ticket) {
   return card
 }
 /** Creates a one-off receipt notice with a unique `name` key so repeated occurrences of the same event are each delivered instead of coalescing. */
-export const receiptNotice = (value: Record<string, unknown>, summary: string): Notice => [key('receipt', randomUUID()), value, summary]
+export const receiptNotice = (value: Record<string, unknown>, summary: string, target?: MessageTarget): Notice =>
+  [key('receipt', randomUUID()), value, summary, target]
 /**
- * Converts an unsolicited domain event into a main-Session notice (`ticket.ended`, `trigger.requeued`, or
+ * Converts an unsolicited domain event into a notice for the Session that owns it (`ticket.ended`, `trigger.requeued`, or
  * `thread.unsubscribed` by a person or executor); returns `undefined` for events that require no notice.
  */
-export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket | undefined = () => undefined): Notice | undefined {
+export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket | undefined = () => undefined,
+  trigger: (id: string) => Trigger | undefined = () => undefined): Notice | undefined {
   const { at } = event
   if (event.type === 'ticket.ended') {
     const { ticketId, by, outcome, reason = outcome } = event.data
     const ended = ticket(ticketId)
-    return receiptNotice(ended ? { ticket_ended: brief(ended) } : { ticket_ended: ticketId, by, outcome, reason, at }, `Ticket ${ticketId} ended (${reason})`)
+    return receiptNotice(ended ? { ticket_ended: brief(ended) } : { ticket_ended: ticketId, by, outcome, reason, at },
+      `Ticket ${ticketId} ended (${reason})`, named({ swarmId: ended?.swarmId, ticketId }))
   }
   if (event.type === 'trigger.requeued') {
-    const id = event.data.triggerId
-    return receiptNotice({ trigger_requeued: id, read: `trigger/${id}`, at }, `Trigger ${id} queued for a fresh assessment`)
+    const id = event.data.triggerId, swarmId = trigger(id)?.meta.swarmId
+    return receiptNotice({ trigger_requeued: id, read: `trigger/${id}`, at }, `Trigger ${id} queued for a fresh assessment`,
+      named({ swarmId: typeof swarmId === 'string' ? swarmId : undefined }))
   }
   return undefined
 }
 
-/** Steering relay payload for the main Session: `id` is the request ID that makes delivery idempotent, `text` is the message body, and `swarmId` names the owning swarm's master. */
-export interface Relay { id: string; text: string; swarmId?: string }
+/** Steering relay payload for a Session: `id` is the request ID that makes delivery idempotent, `text` is the message body, and `target` names who owns it. */
+export interface Relay extends MessageTarget { id: string; text: string }
 /** What a follow-up asks of the main Session: nothing but a stop the person asks for, since its ticket's worker decides it. */
 const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work.'
 /**
@@ -75,38 +84,40 @@ export function followupNotice(store: Store, sources: SourceRegistry, triggerId:
   if (!live.length) return undefined
   const tickets = live.map(ticket => ({ ticket_id: ticket.id, title: ticket.title, state: ticketCard(ticket).state,
     ...disposition!.context?.includes(ticket.id) ? { context: true } : {} }))
-  // The owning swarm of the follow-up: the first live ticket that has one, else the trigger's own swarm metadata.
-  const swarmId = live.find(ticket => ticket.swarmId)?.swarmId
-    ?? (typeof trigger.meta.swarmId === 'string' ? trigger.meta.swarmId : undefined)
-  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets, swarmId)
+  // The owning ticket of the follow-up: the first live one that has a swarm, else the first live one, whose dispatching Session
+  // then owns the message; a ticket without either lets the trigger's own swarm metadata decide the master.
+  const owner = live.find(ticket => ticket.swarmId) ?? live[0]
+  const swarmId = owner?.swarmId ?? (typeof trigger.meta.swarmId === 'string' ? trigger.meta.swarmId : undefined)
+  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets,
+    named({ swarmId, ticketId: owner?.id }))
 }
 /**
- * A person's message that reached tickets, as the main Session hears of it: the message as their workers read it, and the
- * tickets it reached with their state. Their workers decide it; the main Session may only stop the work on it.
+ * A person's message that reached tickets, as the Session owning them hears of it: the message as their workers read it, and
+ * the tickets it reached with their state. Their workers decide it; the Session may only stop the work on it.
  */
 export function followupRelay(message: { trigger_id: string },
-  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean }[], swarmId?: string): Relay {
-  return { id: `followup:${message.trigger_id}`, ...swarmId ? { swarmId } : {}, text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets,
+  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean }[], target?: MessageTarget): Relay {
+  return { id: `followup:${message.trigger_id}`, ...named(target), text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets,
     note: FOLLOWUP_NOTE }) }
 }
-/** Formats a worker report relay for the main Session (truncating summaries over 600 characters behind `ticket/<id>/result`); `replyTo` names the human question trigger it answers. */
+/** Formats a worker report relay for the Session that owns `ticket` (truncating summaries over 600 characters behind `ticket/<id>/result`); `replyTo` names the human question trigger it answers. */
 export function resultRelay(ticket: Ticket, state: string, text: string, replyTo?: string): Relay {
   const id = key('worker-result', ticket.id, ticket.updatedAt, text)
   const summary = text.length > 600 ? { summary: text.slice(0, 600), chars: text.length } : { summary: text }
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state, ...replyTo ? { answer_to: replyTo } : {},
     ...summary, read: `ticket/${ticket.id}/result` }
-  return { id: `report:${id}`, ...ticket.swarmId ? { swarmId: ticket.swarmId } : {}, text: JSON.stringify(report) }
+  return { id: `report:${id}`, ...named({ swarmId: ticket.swarmId, ticketId: ticket.id }), text: JSON.stringify(report) }
 }
 /**
- * Converts a worker report recorded on `ticket` into a main-Session relay: a question for a person produces a
- * `worker_attention` relay, and a result, blocker, end, or answer to a question produces a `worker_report` relay, while
+ * Converts a worker report recorded on `ticket` into a relay for the Session that owns it: a question for a person produces
+ * a `worker_attention` relay, and a result, blocker, end, or answer to a question produces a `worker_report` relay, while
  * routine `progress` reports without `answers` stay internal.
- * @returns The steering `Relay`, or `undefined` when the report is not relayed to the main Session.
+ * @returns The steering `Relay`, or `undefined` when the report is not relayed.
  */
 export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' | 'summary' | 'question' | 'answers'>): Relay | undefined {
   const asked = report.question ? ticket.attention : undefined
   if (asked) {
-    return { id: `attention:${ticket.id}:${asked.id}`, ...ticket.swarmId ? { swarmId: ticket.swarmId } : {},
+    return { id: `attention:${ticket.id}:${asked.id}`, ...named({ swarmId: ticket.swarmId, ticketId: ticket.id }),
       text: JSON.stringify({ kind: 'worker_attention', ticket: brief(ticket), state: report.state, read: `ticket/${ticket.id}/result` }) }
   }
   if (report.state === 'progress' && !report.answers) return undefined

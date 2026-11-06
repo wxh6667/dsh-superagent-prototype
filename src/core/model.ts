@@ -279,6 +279,8 @@ export interface Ticket {
   title: string
   /** The Swarm that owns this ticket; absent on tickets persisted before schema 12, which migration assigns to the legacy swarm. */
   swarmId?: string
+  /** The Session that dispatched this ticket: where its reports and questions go when no active Swarm owns it. Absent on tickets accepted before it was recorded. */
+  originSessionId?: string
   decisionId: string
   mandate: Mandate
   /** The Channels of the messages it was accepted from, which its replies go to. */

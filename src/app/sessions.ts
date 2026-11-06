@@ -7,6 +7,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
+import type { MessageTarget } from './notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
@@ -31,7 +32,7 @@ export interface SessionsHost {
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
   readonly masterId: string
-  /** The master Session that owns `swarmId`, or `undefined` when it has none so the legacy master is the fallback. */
+  /** The master Session of the active Swarm `swarmId`, or `undefined` when it has none. */
   readonly masterFor?: (swarmId?: string) => string | undefined
   readonly lifetime: AbortSignal
   closing(): boolean
@@ -144,13 +145,17 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
-  /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
+  /** Registers ordered `relay` and `notice` effect handlers that deliver to the Session owning the message, in the order queued. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
     this.agentDelivery = new AgentDelivery(host.context)
-    // Deliver relays and notices to the owning swarm's master Session, or the legacy master, in the order they were queued.
-    host.effects.handle('relay', ({ text, swarmId }, requestId) => this.prompt(this.masterFor(swarmId), requestId, text, 'steer'), { ordered: true })
-    host.effects.handle('notice', ({ value, summary, swarmId }, name) => this.inject(name, value, summary, swarmId), { ordered: true })
+    // A message with no owner is not dropped: throwing records it in the effect and its health entry, which retries until fixed.
+    host.effects.handle('relay', ({ text, swarmId, ticketId }, requestId) => {
+      const target = this.messageTarget({ swarmId, ticketId })
+      if (!target) throw new Error(`No Session owns the message ${requestId}: ticket ${ticketId} is not stored`)
+      return this.prompt(target, requestId, text, 'steer')
+    }, { ordered: true })
+    host.effects.handle('notice', ({ value, summary, swarmId, ticketId }, name) => this.inject(name, value, summary, { swarmId, ticketId }), { ordered: true })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
@@ -229,21 +234,39 @@ export class Sessions {
   }
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
-  /** The Session a swarm-related message targets: the owning swarm's master, or the legacy master when it names none. */
-  private masterFor(swarmId?: string): string { return this.host.masterFor?.(swarmId) ?? this.host.masterId }
-  /** Enqueues a steering relay to the owning swarm's master Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
-  relay(requestId: string, text: string, swarmId?: string): void { this.host.effects.enqueue('relay', requestId, { text, swarmId }) }
-  /** Enqueues a durable background notice for injection into the owning swarm's master Session; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
-  notify(name: string, value: Record<string, unknown>, summary: string, swarmId?: string): void { this.host.effects.enqueue('notice', name, { value, summary, swarmId }) }
-  /** Waits for currently runnable `notice` effects to settle and returns `'injected'` if notice `name` has reached the main Session or `'pending'` if it is still queued. */
+  /**
+   * The Session a message about a ticket or a Swarm goes to, in order: the master of the active Swarm that owns it, the
+   * Session that dispatched the ticket, or the legacy master for a ticket recorded before dispatch Sessions and for a
+   * message about no ticket. `undefined` when a ticket-related message names a ticket the Store does not have.
+   */
+  messageTarget({ swarmId, ticketId }: MessageTarget = {}): string | undefined {
+    const master = this.host.masterFor?.(swarmId)
+    if (master) return master
+    if (ticketId === undefined) return this.host.masterId
+    const ticket = this.host.store.tickets.get(ticketId)
+    return ticket ? ticket.originSessionId ?? this.host.masterId : undefined
+  }
+  /** Enqueues a steering relay to the Session owning `target`; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
+  relay(requestId: string, text: string, target?: MessageTarget): void { this.host.effects.enqueue('relay', requestId, { text, ...target }) }
+  /** Enqueues a durable background notice for injection into the Session owning `target`; a new notice with the same `name` replaces a still-waiting notice of that `name`. */
+  notify(name: string, value: Record<string, unknown>, summary: string, target?: MessageTarget): void { this.host.effects.enqueue('notice', name, { value, summary, ...target }) }
+  /** Waits for currently runnable `notice` effects to settle and returns `'injected'` if notice `name` has reached its Session or `'pending'` if it is still queued. */
   async delivery(name: string): Promise<'injected' | 'pending'> {
     await this.host.effects.idle('notice')
     return this.host.effects.pending('notice', name) ? 'pending' : 'injected'
   }
-  /** Injects a notice into the owning swarm's master Session without waking it; no-op if that Session does not exist yet. */
-  private async inject(name: string, value: Record<string, unknown>, summary: string, swarmId?: string): Promise<void> {
-    const resolved = await this.ctx.sessionController.resolveAgent(this.masterFor(swarmId) as SessionId)
-    if ('error' in resolved) return
+  /**
+   * Injects a notice into the Session owning `target` without waking it. A Session that does not exist yet is left alone and
+   * logged; a notice with no owner throws so `Effects` records the failure and its health entry shows it.
+   */
+  private async inject(name: string, value: Record<string, unknown>, summary: string, target?: MessageTarget): Promise<void> {
+    const destination = this.messageTarget(target)
+    if (!destination) throw new Error(`No Session owns the notice ${name}: ticket ${target?.ticketId} is not stored`)
+    const resolved = await this.ctx.sessionController.resolveAgent(destination as SessionId)
+    if ('error' in resolved) {
+      this.ctx.logger.warn('dsh-superagent could not deliver the notice %s to Session %s: %s', name, destination, resolved.error.code)
+      return
+    }
     // Deduplicate by notice name and payload hash so retries are idempotent while updated payloads still deliver.
     const text = JSON.stringify(value)
     await this.agentDelivery.send(resolved.agent, `notice:${name}:${key(text)}`, text, { inject: summary }, this.host.lifetime)
