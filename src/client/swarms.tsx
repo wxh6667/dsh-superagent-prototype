@@ -1,10 +1,13 @@
 /** Swarm launcher: a goal and a workspace up front, the rest of the brief under Advanced, and the active and completed swarms. */
 import { useEffect, useState } from 'react'
+import type { ApiResponse } from '../app/api.ts'
+import type { SwarmModel } from '../core/index.ts'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SwarmView } from './api.ts'
 import { Button, DisclosureRow, Dot, Icon, Input, Tag } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { Field, Fields, numberOf } from './settings-kit.tsx'
+import { errorText } from './text.ts'
 import { ConfirmButton, Hint, LoadState, Section, When } from './widgets.tsx'
 
 interface Draft {
@@ -20,17 +23,54 @@ interface Draft {
   scope: string
   verify: string
   prepare: string
+  /** The main-Session model the swarm pins, as a dropdown value; empty inherits the global setting. */
+  masterModel: string
+  /** The worker model the swarm pins, as a dropdown value; empty inherits the global setting. */
+  workerModel: string
   maxTasks: string
   maxWorkers: string
   maxRounds: string
 }
 /** Defaults offered by the form; they match the SwarmManager's budget defaults. */
 const INITIAL: Draft = { mission: '', workspace: '', manual: false, title: '', titleEdited: false, advanced: false,
-  acceptance: '', scope: '', verify: 'scripts/verify.sh', prepare: '', maxTasks: '20', maxWorkers: '2', maxRounds: '3' }
+  acceptance: '', scope: '', verify: 'scripts/verify.sh', prepare: '', masterModel: '', workerModel: '',
+  maxTasks: '20', maxWorkers: '2', maxRounds: '3' }
+
+/** One model dropdown value: a JSON pair of provider and model id, or empty for inheriting the global setting. */
+const modelValue = (provider: string, model: string): string => JSON.stringify([provider, model])
+/**
+ * The model a dropdown value names: `undefined` for inherit, or `false` for a value this page did not write. A pin is never
+ * saved from an unreadable value, so a stale or edited form cannot silently record an empty model.
+ */
+export function modelOf(value: string): SwarmModel | undefined | false {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (Array.isArray(parsed) && parsed.length === 2 && typeof parsed[0] === 'string' && parsed[0]
+      && typeof parsed[1] === 'string' && parsed[1]) return { provider: parsed[0], model: parsed[1] }
+  } catch { /* Not a value this page wrote. */ }
+  return false
+}
 
 /** The title a mission derives: its first non-empty line, truncated to the stored limit. */
 export function titleOf(mission: string): string {
   return (mission.split('\n').map(line => line.trim()).find(Boolean) ?? '').slice(0, LIMITS.swarm.title)
+}
+
+/** One model dropdown of the launcher: "inherit" first, then every provider and its available models. */
+function ModelSelect({ label, value, groups, onChange }: {
+  label: string; value: string; onChange: (next: string) => void
+  groups: readonly { id: string; name: string; models: readonly { id: string; name: string }[] }[]
+}) {
+  const { t } = usePanel()
+  return <Field label={label} hint={t('swarmModelHint')}>
+    <select className="dt-select" value={value} onChange={event => onChange(event.target.value)}>
+      <option value="">{t('swarmModelInherit')}</option>
+      {groups.map(group => <optgroup key={group.id} label={group.name}>
+        {group.models.map(model => <option key={model.id} value={modelValue(group.id, model.id)}>{model.name}</option>)}
+      </optgroup>)}
+    </select>
+  </Field>
 }
 
 function SwarmRow({ swarm, onOpen, onFinish, busy }: {
@@ -38,6 +78,8 @@ function SwarmRow({ swarm, onOpen, onFinish, busy }: {
 }) {
   const { t } = usePanel()
   const active = swarm.status === 'active' && !swarm.legacy
+  const pinned = (model: SwarmModel | undefined) => model
+    ? <span className="dt-mono">{`${model.provider} / ${model.model}`}</span> : t('swarmModelInherit')
   return <li className="dt-row">
     <Dot state={swarm.legacy ? 'idle' : active ? 'ongoing' : 'done'} />
     <div className="dt-row-main">
@@ -53,6 +95,8 @@ function SwarmRow({ swarm, onOpen, onFinish, busy }: {
         <span>{t('swarmMaster')}{t('labelSeparator')}<span className="dt-mono">{swarm.masterSessionId || t('empty')}</span></span>
         {!swarm.legacy && <span>{t('swarmBudgetValue', { tasks: swarm.budget.maxTasks, workers: swarm.budget.maxWorkers,
           rounds: swarm.budget.maxRounds })}</span>}
+        {!swarm.legacy && <span title={t('swarmModelHint')}>{t('swarmMasterModel')}{t('labelSeparator')}{pinned(swarm.masterModel)}</span>}
+        {!swarm.legacy && <span title={t('swarmModelHint')}>{t('swarmWorkerModel')}{t('labelSeparator')}{pinned(swarm.workerModel)}</span>}
         <span>{t('swarmCreated')} <When at={swarm.createdAt} /></span>
         {swarm.completedAt && <span><When at={swarm.completedAt} /></span>}
       </div>
@@ -70,6 +114,17 @@ export function SwarmsPage() {
   const { t, call, openSession } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET swarms'), [call])
   const [draft, setDraft] = useState(INITIAL)
+  // The launcher's model choices come from the host's catalog; a failure says so instead of hiding the dropdowns.
+  const [catalog, setCatalog] = useState<{ models?: ApiResponse<'GET models'>; error?: string }>({})
+  useEffect(() => {
+    let live = true
+    call('GET models').then(value => { if (live) setCatalog({ models: value }) },
+      failure => { if (live) setCatalog({ error: errorText(failure) }) })
+    return () => { live = false }
+  }, [call])
+  const groups = catalog.models?.groups.filter(group => group.models.length > 0) ?? []
+  const catalogNote = catalog.error ? t('swarmModelCatalogUnavailable', { error: catalog.error })
+    : catalog.models && groups.length === 0 ? t('swarmModelCatalogEmpty') : undefined
   const fallback = data?.defaultWorkspace ?? ''
   // Pre-fill the workspace once the local Source's repository is known, unless the person already chose one.
   useEffect(() => { if (fallback) setDraft(current => current.workspace ? current : { ...current, workspace: fallback }) }, [fallback])
@@ -82,6 +137,10 @@ export function SwarmsPage() {
     const mission = draft.mission.trim(), workspace = draft.workspace.trim()
     if (!mission) throw new Error(t('swarmMissionRequired'))
     if (!workspace) throw new Error(t('swarmWorkspaceRequired'))
+    // A chosen model is saved as chosen; an unreadable value fails loudly rather than being dropped as inherit.
+    const masterModel = modelOf(draft.masterModel), workerModel = modelOf(draft.workerModel)
+    if (masterModel === false) throw new Error(t('swarmModelInvalid', { field: t('swarmMasterModel') }))
+    if (workerModel === false) throw new Error(t('swarmModelInvalid', { field: t('swarmWorkerModel') }))
     const maxTasks = numberOf(draft.maxTasks), maxWorkers = numberOf(draft.maxWorkers), maxRounds = numberOf(draft.maxRounds)
     if (maxTasks === null || maxWorkers === null || maxRounds === null
       || !Number.isInteger(maxTasks) || !Number.isInteger(maxWorkers) || !Number.isInteger(maxRounds)) {
@@ -93,6 +152,8 @@ export function SwarmsPage() {
       verify: draft.verify.trim() || 'scripts/verify.sh', prepare: draft.prepare,
       ...draft.acceptance.trim() ? { acceptance: draft.acceptance.trim() } : {},
       ...draft.scope.trim() ? { scope: draft.scope.trim() } : {},
+      ...masterModel ? { masterModel } : {},
+      ...workerModel ? { workerModel } : {},
       budget: { maxTasks, maxWorkers, maxRounds },
     } })
     const opened = await call('POST swarms/:id/open', { id: created.swarm.id })
@@ -172,6 +233,11 @@ export function SwarmsPage() {
                   value={draft.maxRounds} onChange={event => edit({ maxRounds: event.target.value })} />
               </Field>
             </div>
+            {catalogNote && <Hint>{catalogNote}</Hint>}
+            <ModelSelect label={t('swarmMasterModel')} value={draft.masterModel} groups={groups}
+              onChange={value => edit({ masterModel: value })} />
+            <ModelSelect label={t('swarmWorkerModel')} value={draft.workerModel} groups={groups}
+              onChange={value => edit({ workerModel: value })} />
           </DisclosureRow>
         </Fields>
         <div className="dt-actions">

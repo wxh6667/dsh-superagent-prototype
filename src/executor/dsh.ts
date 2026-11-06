@@ -10,7 +10,7 @@ import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Execu
 import { automatic } from '../core/tickets.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
-import type { Settings } from '../policy.ts'
+import type { RoleModel, Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
@@ -81,6 +81,11 @@ export interface ExecutorHost {
   prepareCommand?(ticket: Ticket): string
   /** The swarm that owns `ticket`, when it belongs to one; legacy and unknown ownership keep the global-only behavior. */
   swarmOf?(ticket: Ticket): Swarm | undefined
+  /**
+   * The active swarm whose master Session is `sessionId`, when the caller can tell. A Ticket a swarm's master dispatched
+   * records that Session, so its worker still finds the swarm that pinned its model even when the Ticket itself names none.
+   */
+  swarmOfSession?(sessionId: string): Swarm | undefined
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
@@ -319,7 +324,8 @@ export class DshExecutor implements Executor {
         try {
           // Recreate the worker session if it was externally deleted.
           if (!this.host.context.agents.get(sessionId as SessionId)) {
-            await this.host.sessions.ensure(sessionId, ticket.execution?.directory ?? '', ticket.title, 'worker', ticket.swarmId)
+            await this.host.sessions.ensure(sessionId, ticket.execution?.directory ?? '', ticket.title, 'worker', ticket.swarmId,
+              this.workerModel(ticket))
           }
           if (input) await this.deliverInput(ticket, assignment, input)
         } catch (error) {
@@ -421,6 +427,17 @@ export class DshExecutor implements Executor {
     if (running >= swarm.budget.maxWorkers)
       throw new Later(`Swarm ${swarm.id} already runs its maximum of ${swarm.budget.maxWorkers} workers`)
   }
+  /**
+   * The model `ticket`'s swarm pins for its workers, or `undefined` when it has no owner, no pin, or a legacy owner; the
+   * worker Session then starts with the global Executor model. A completed swarm's Ticket cannot launch, so only a live
+   * swarm's pin matters here. A Ticket dispatched by a swarm's master before the swarm was saved names no swarm of its own,
+   * so its dispatching Session resolves the swarm that pinned the model.
+   */
+  private workerModel(ticket: Ticket): RoleModel | undefined {
+    const swarm = this.host.swarmOf?.(ticket)
+      ?? (ticket.originSessionId === undefined ? undefined : this.host.swarmOfSession?.(ticket.originSessionId))
+    return swarm?.workerModel
+  }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
@@ -459,7 +476,8 @@ export class DshExecutor implements Executor {
     }
     if (!current()) return
     const sessionId = workerSessionId(ticket.id)
-    const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker', ticket.swarmId)
+    const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker', ticket.swarmId,
+      this.workerModel(ticket))
     if (!current()) return
     // The background work of the Assignment this one replaces stops first, so its end does not clear this one's message.
     await this.stopped(ticket.id)

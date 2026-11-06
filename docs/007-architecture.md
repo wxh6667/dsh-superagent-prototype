@@ -289,7 +289,7 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
-| `src/core/swarm.ts` | The Swarm aggregate: a goal-scoped batch with its mission, workspace, budget, status, master Session and legacy marker, and `LEGACY_SWARM_ID` |
+| `src/core/swarm.ts` | The Swarm aggregate: a goal-scoped batch with its mission, workspace, budget, status, master Session, optional master and worker model pins, and legacy marker, and `LEGACY_SWARM_ID` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
 | `src/core/part.ts` | `EnginePart`, the base of the Engine's parts, and `EngineOptions` |
@@ -363,7 +363,7 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
-| `src/client/swarms.tsx` | The Swarm launcher: a goal and a workspace up front, the rest of the brief under Advanced with the title derived from the goal, active and completed swarms with their workspace, budget and master, and Open and Finish |
+| `src/client/swarms.tsx` | The Swarm launcher: a goal and a workspace up front, the rest of the brief under Advanced with the title derived from the goal and the main-Session and worker model dropdowns read from the model catalog, active and completed swarms with their workspace, budget, models and master, and Open and Finish |
 | `src/client/swarm-status.tsx` | The task status of the Swarm whose master Session the conversation shows: running, waiting and just-ended counts with the latest change, in the conversation header |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
@@ -412,6 +412,7 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `tests/swarm.spec.ts` | The Swarm repository and the schema 11 to 12 migration: a fresh database, the legacy swarm, owned historical Tickets and idempotent reopen |
 | `tests/swarms.spec.ts` | The SwarmManager on a real Store: creation validation, master ensure/unarchive, listing, the open and finish lifecycle, workspace cleanup that never blocks completion, startup repair and cleanup retry, and master resolution for active tickets |
 | `tests/swarm-workspaces.spec.ts` | `SwarmWorkspaces`: new versus reused registrations, cleanup failures kept for a retry, user and local workspaces retained, the long-term list, and completed or orphaned leftovers cleaned at startup |
+| `tests/swarm-models.spec.ts` | A Swarm's pinned models: a new master and worker Session start with the pin, each Swarm's worker takes its own Swarm's pin, and a role a Swarm does not pin inherits the global model |
 | `tests/notices.spec.ts` | Notices and relays carry their owning Ticket and swarm: result, report/attention and follow-up relays, the trigger-metadata fallback, and the legacy empty case |
 | `tests/report-delivery.spec.ts` | Where a Ticket's reports, attention and end notice go: the dispatching Session, a Swarm's master ahead of it, the legacy master for older Tickets, and the health or log of a message with no owner |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |

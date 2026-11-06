@@ -141,10 +141,14 @@ it('lists swarms with the launcher defaults and creates, opens and finishes one'
     items: [{ ...active, tasks: { running: 0, pending: 0, ended: 0 } }, { ...legacy, tasks: { running: 0, pending: 0, ended: 0 } }],
     workspaces: [{ id: 'w1', path: '/srv/repo', title: 'repo' }], defaultWorkspace: '/srv/repo', legacyMasterId: 'legacy-master' } })
   const brief = { title: ' Ship ', mission: ' Do it ', acceptance: ' Works ', scope: ' repo ', workspace: '/srv/repo',
-    verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } }
+    verify: 'scripts/verify.sh', prepare: '', masterModel: { provider: ' provider-a ', model: ' main ' },
+    workerModel: { provider: 'provider-b', model: 'fast', reasoningEffort: 'high' },
+    budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } }
   expect(await call('POST', 'swarms', brief)).toEqual({ status: 200, body: { swarm: created, masterId: 'orchestrator-s1' } })
   expect(create).toHaveBeenCalledWith({ title: 'Ship', mission: 'Do it', acceptance: 'Works', scope: 'repo', workspace: '/srv/repo',
-    verify: 'scripts/verify.sh', prepare: '', budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } })
+    verify: 'scripts/verify.sh', prepare: '', masterModel: { provider: 'provider-a', model: 'main' },
+    workerModel: { provider: 'provider-b', model: 'fast', reasoningEffort: 'high' },
+    budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } })
   expect(await call('POST', 'swarms/s1/open')).toEqual({ status: 200, body: { swarm: active, masterId: 'orchestrator-s1' } })
   expect(open).toHaveBeenCalledWith('s1')
   expect(await call('POST', 'swarms/s1/finish')).toEqual({ status: 200, body: { swarm: completed } })
@@ -164,6 +168,10 @@ it('refuses an invalid swarm brief and reports manager refusals as 400 with thei
   expect((await call('POST', 'swarms', { title: 't', mission: 'm', workspace: 'relative' })).body.error).toContain('absolute workspace')
   expect((await call('POST', 'swarms', { title: 't', mission: 'm', workspace: '/r',
     budget: { maxTasks: 0 } })).body.error).toContain('maxTasks')
+  expect((await call('POST', 'swarms', { title: 't', mission: 'm', workspace: '/r',
+    masterModel: { provider: '  ', model: 'main' } })).body.error).toContain('masterModel')
+  expect((await call('POST', 'swarms', { title: 't', mission: 'm', workspace: '/r',
+    workerModel: { provider: 'provider', model: '' } })).body.error).toContain('workerModel')
   expect(await call('POST', 'swarms', { title: 't', mission: 'm', workspace: '/r' }))
     .toEqual({ status: 400, body: { error: 'Not a Trellis workspace' } })
   expect(await call('POST', 'swarms/s1/open')).toEqual({ status: 400, body: { error: 'Unknown swarm s1' } })

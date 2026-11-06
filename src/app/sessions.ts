@@ -14,6 +14,7 @@ import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
+import type { RoleModel } from '../policy.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { sameSession } from './swarms.ts'
@@ -191,9 +192,11 @@ export class Sessions {
   /**
    * Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools,
    * sets `danger-full-access` permissions, and renames it to `title`. `swarmId`, when given, receives the workspace
-   * registration this call creates or reuses so the swarm's end removes only what it added.
+   * registration this call creates or reuses so the swarm's end removes only what it added. `model` is the swarm's pin for
+   * this role; absent, the Session starts with the global role model, and an existing Session keeps the model it already uses.
    */
-  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker', swarmId?: string): Promise<Agent> {
+  async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker', swarmId?: string,
+    model?: RoleModel | null): Promise<Agent> {
     // Register before any await so the `agent/created` decoration already treats this Session as a master.
     if (role === 'orchestrator') this.masters.add(id)
     const ctx = this.ctx
@@ -207,15 +210,16 @@ export class Sessions {
     }
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    const inherited = role === 'orchestrator' ? settings.eval.model : settings.executor.model
+    await initializeRoleModel(ctx, result.agent, model ?? inherited)
     await this.decorate(result.agent)
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
   /** Ensures the master Session of a swarm, recording its workspace for `swarmId`; the bounded call the SwarmManager uses. */
-  async ensureMaster(id: string, cwd: string, title: string, swarmId?: string): Promise<Agent> {
-    return this.ensure(id, cwd, title, 'orchestrator', swarmId)
+  async ensureMaster(id: string, cwd: string, title: string, swarmId?: string, model?: RoleModel | null): Promise<Agent> {
+    return this.ensure(id, cwd, title, 'orchestrator', swarmId, model)
   }
   /** Whether `sessionId` is a registered master Session, including the legacy single master, with or without DSH's `dsh_` prefix. */
   isMaster(sessionId: string): boolean {

@@ -140,7 +140,8 @@ export class Runtime extends Service implements SourceHost {
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger), prepareCommand: ticket => this.prepareCommand(ticket),
-        swarmOf: ticket => ticket.swarmId ? this.swarms.get(ticket.swarmId) : undefined })
+        swarmOf: ticket => ticket.swarmId ? this.swarms.get(ticket.swarmId) : undefined,
+        swarmOfSession: sessionId => this.swarms.swarmOf(sessionId) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })

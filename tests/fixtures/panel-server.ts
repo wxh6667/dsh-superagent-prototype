@@ -97,6 +97,8 @@ export interface PanelServer {
   swarms: SwarmView[]; workspaces: RegisteredWorkspace[]; defaultWorkspace: string
   /** When set, open and finish refuse with this message. */
   swarmError?: string
+  /** When set, the model catalog refuses with this message, as an unavailable provider list does. */
+  modelsError?: string
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
@@ -289,7 +291,8 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST swarms': { body: true, answer: ({ body }) => {
     const id = `swarm-${server.swarms.length + 1}`
     const swarm: SwarmView = { id, title: body.title, mission: body.mission, ...body.acceptance ? { acceptance: body.acceptance } : {},
-      ...body.scope ? { scope: body.scope } : {}, workspace: body.workspace, verify: body.verify || 'scripts/verify.sh',
+      ...body.scope ? { scope: body.scope } : {}, ...body.masterModel ? { masterModel: body.masterModel } : {},
+      ...body.workerModel ? { workerModel: body.workerModel } : {}, workspace: body.workspace, verify: body.verify || 'scripts/verify.sh',
       prepare: body.prepare ?? '', budget: { maxTasks: 20, maxWorkers: 2, maxRounds: 3, ...body.budget }, status: 'active',
       masterSessionId: `orchestrator-${id}`, createdAt: '2026-11-06T00:00:00Z', tasks: { running: 0, pending: 0, ended: 0 } }
     server.swarms = [swarm, ...server.swarms]
@@ -385,7 +388,8 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET policy/history': { answer: () => server.history },
   'POST policy-sync/:id': { answer: ({ params }) => ({ policy: server.settings.policy.sources[params.id] }) },
   'POST setup/check': { answer: () => ({ restarting: true }) },
-  'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
+  'GET models': { answer: () => server.modelsError ? refuse(400, server.modelsError) : ({ default: { provider: 'host', model: 'default' },
+    routableProviders: [], failures: [],
     groups: [{ id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
       reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }) },
   'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },

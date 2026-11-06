@@ -10,7 +10,7 @@ import type { SwarmManager } from './swarms.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
   from './prompts.ts'
-import { policyVersion } from '../policy.ts'
+import { policyVersion, RoleModelSchema } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
@@ -169,6 +169,10 @@ const SwarmBrief = z.object({
     .refine(isAbsolute, 'An absolute workspace path is required'),
   verify: z.string().trim().max(LIMITS.swarm.verify).optional().transform(value => value || 'scripts/verify.sh'),
   prepare: z.string().max(LIMITS.prepareCommand).optional(),
+  /** Absent inherits the global main-Session model; the route trims and rejects an empty provider or model. */
+  masterModel: RoleModelSchema.optional(),
+  /** Absent inherits the global Executor model. */
+  workerModel: RoleModelSchema.optional(),
   budget: SwarmBudgetInput.optional(),
 }).strict()
 /** Validate a new swarm's brief, naming each bad field in the 400 the panel shows. */

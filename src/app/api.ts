@@ -1,6 +1,6 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
-import type { Swarm, SwarmBudget } from '../core/index.ts'
+import type { Swarm, SwarmBudget, SwarmModel } from '../core/index.ts'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
@@ -30,6 +30,10 @@ export interface SwarmBriefInput {
   workspace: string
   verify?: string
   prepare?: string
+  /** The model a new master Session starts with; absent inherits the global main-Session model. */
+  masterModel?: SwarmModel
+  /** The model a new worker Session starts with; absent inherits the global Executor model. */
+  workerModel?: SwarmModel
   budget?: Partial<SwarmBudget>
 }
 

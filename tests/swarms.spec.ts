@@ -6,6 +6,7 @@ import { Store } from '../src/app/store.ts'
 import { SwarmWorkspaces, type RegisteredWorkspace } from '../src/app/swarm-workspaces.ts'
 import { SwarmManager, type SwarmCreateInput } from '../src/app/swarms.ts'
 import type { Swarm, SwarmBudget, Ticket } from '../src/core/index.ts'
+import type { RoleModel } from '../src/policy.ts'
 import { MAX_ACTIVE_SWARMS, SWARM_LIMITS } from '../src/limits.ts'
 
 let directory: string
@@ -38,15 +39,15 @@ const swarm = (id: string, status: Swarm['status'] = 'active', fields: Partial<S
 
 /** A SwarmManager over the real Store with recording fakes for the master, archival, workspace and reporting seams. */
 function fake(fail?: (sessionId: string) => boolean) {
-  const ensured: { id: string; cwd: string; title: string; swarmId?: string }[] = []
+  const ensured: { id: string; cwd: string; title: string; swarmId?: string; model?: RoleModel | null }[] = []
   const unarchived: string[] = []
   const archived: string[] = []
   const cleaned: string[] = []
   const reconciled: Swarm[][] = []
   const reported: { swarm: Swarm; error: unknown }[] = []
-  const ensureMaster = vi.fn(async (id: string, cwd: string, title: string, swarmId?: string) => {
+  const ensureMaster = vi.fn(async (id: string, cwd: string, title: string, swarmId?: string, model?: RoleModel | null) => {
     if (fail?.(id)) throw new Error(`cannot ensure ${id}`)
-    ensured.push({ id, cwd, title, ...swarmId ? { swarmId } : {} })
+    ensured.push({ id, cwd, title, ...swarmId ? { swarmId } : {}, ...model ? { model } : {} })
   })
   const archiveSession = vi.fn(async (id: string) => { archived.push(id) })
   const unarchiveSession = vi.fn(async (id: string) => { unarchived.push(id) })
@@ -88,6 +89,27 @@ it('creates the master and saves an active swarm with the supplied brief and bud
   expect(relay).toHaveBeenCalledWith(`swarm-brief:${created.id}`, JSON.stringify({ kind: 'swarm_brief', goal: 'Do the thing',
     workspace, acceptance: 'It works', scope: 'the repo', validation: 'scripts/verify.sh',
     budget: { maxTasks: 4, maxWorkers: 2, maxRounds: 3 } }), { swarmId: created.id })
+})
+
+it('pins a model for new master and worker Sessions, stores it, and gives it to the master again on reopen', async () => {
+  const { manager, ensured } = fake()
+  const masterModel = { provider: 'provider-a', model: 'main' }
+  const workerModel = { provider: 'provider-b', model: 'fast', reasoningEffort: 'high' }
+  const created = await manager.create(brief({ masterModel, workerModel }))
+  // The swarm is saved after its master exists, so creation hands the pin over instead of reading it back.
+  expect(created.masterModel).toEqual(masterModel)
+  expect(created.workerModel).toEqual(workerModel)
+  expect(ensured[0]).toMatchObject({ id: created.masterSessionId, model: masterModel })
+  await manager.open(created.id)
+  expect(ensured[1]).toMatchObject({ id: created.masterSessionId, model: masterModel })
+})
+
+it('stores no model field for a swarm that pins none, so it inherits the global settings', async () => {
+  const { manager, ensured } = fake()
+  const plain = await manager.create(brief())
+  expect(plain).not.toHaveProperty('masterModel')
+  expect(plain).not.toHaveProperty('workerModel')
+  expect(ensured).toEqual([{ id: plain.masterSessionId, cwd: workspace, title: '[swarm] Ship it', swarmId: plain.id }])
 })
 
 it('leaves no swarm behind when creating its master fails, and removes the workspace registration it added', async () => {

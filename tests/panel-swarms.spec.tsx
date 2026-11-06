@@ -2,6 +2,7 @@
 // The Swarm launcher: a goal and a workspace up front, the rest under Advanced, and the active and completed swarms.
 import { expect, it } from 'vitest'
 import { zh } from '../src/client/locales.ts'
+import { modelOf } from '../src/client/swarms.tsx'
 import { usePanel, mount, settle, all, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 
@@ -105,4 +106,46 @@ it('reports a refused action in the interface language without dropping the acti
   await settle()
   expect(document.querySelector('.dt-toast')?.textContent).toBe('Swarm swarm-active still has 1 open ticket')
   expect(server.swarms.find(swarm => swarm.id === 'swarm-active')).toMatchObject({ status: 'active' })
+})
+
+it('pins a model per role from the catalog, defaults to inherit, and shows the choice on the row', async () => {
+  await launcher()
+  await click(zh.swarmAdvanced)
+  // Both dropdowns start at inherit and offer every catalog provider's models.
+  const master = field<HTMLSelectElement>(zh.swarmMasterModel), worker = field<HTMLSelectElement>(zh.swarmWorkerModel)
+  expect(master.value).toBe('')
+  expect(worker.value).toBe('')
+  expect([...master.options].map(option => option.textContent)).toEqual([zh.swarmModelInherit, 'Worker model'])
+  // Pin the worker model only; the master keeps inheriting the global setting.
+  const choice = [...worker.options].find(option => option.textContent === 'Worker model')!
+  await type(worker, choice.value)
+  expect(choice.selected).toBe(true)
+  await type(field<HTMLTextAreaElement>(zh.swarmMission), '按 Swarm 选模型')
+  await click(zh.swarmCreate)
+  expect(posted()).toMatchObject({ workerModel: { provider: 'worker-provider', model: 'worker-model' } })
+  expect(posted()).not.toHaveProperty('masterModel')
+  // The new row shows the pin, and the role left unset as inheriting.
+  expect(text()).toContain('worker-provider / worker-model')
+  expect(text()).toContain(zh.swarmModelInherit)
+})
+
+it('says the catalog is unavailable instead of offering or saving a model when it cannot be read', async () => {
+  server.modelsError = 'catalog is down'
+  await launcher()
+  await click(zh.swarmAdvanced)
+  expect(text()).toContain('catalog is down')
+  // Only inherit remains selectable, so creating a swarm cannot save an unreadable model.
+  const worker = field<HTMLSelectElement>(zh.swarmWorkerModel)
+  expect([...worker.options].map(option => option.textContent)).toEqual([zh.swarmModelInherit])
+  await type(field<HTMLTextAreaElement>(zh.swarmMission), '没有模型目录')
+  await click(zh.swarmCreate)
+  expect(posted()).not.toHaveProperty('masterModel')
+  expect(posted()).not.toHaveProperty('workerModel')
+})
+
+it('reads only the model values the launcher wrote, never turning an unreadable one into inherit', () => {
+  expect(modelOf('')).toBeUndefined()
+  expect(modelOf(JSON.stringify(['provider-a', 'model-a']))).toEqual({ provider: 'provider-a', model: 'model-a' })
+  for (const value of ['provider-a/model-a', '[]', JSON.stringify(['provider-a', '']), JSON.stringify(['', 'model-a']),
+    JSON.stringify([1, 2]), JSON.stringify(['a', 'b', 'c'])]) expect(modelOf(value)).toBe(false)
 })

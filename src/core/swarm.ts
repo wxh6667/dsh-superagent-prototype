@@ -4,6 +4,8 @@
 export type SwarmStatus = 'active' | 'completed'
 /** Caps a swarm's work: tasks it may open, workers it may run at once, and coordination rounds it may take. */
 export interface SwarmBudget { maxTasks: number; maxWorkers: number; maxRounds: number }
+/** A model route a swarm may pin for one role; its shape matches the global role models in Settings. */
+export interface SwarmModel { provider: string; model: string; reasoningEffort?: string }
 /** A goal-scoped batch: one mission brief, one master Session, and the tickets created under it. */
 export interface Swarm {
   id: string
@@ -12,6 +14,10 @@ export interface Swarm {
   mission: string
   acceptance?: string
   scope?: string
+  /** The model a new master Session of this swarm starts with; absent inherits the global main-Session model. */
+  masterModel?: SwarmModel
+  /** The model a new worker Session of this swarm starts with; absent inherits the global Executor model. */
+  workerModel?: SwarmModel
   /** Absolute local workspace path the swarm is bound to at creation. */
   workspace: string
   /** Command each worker runs to validate its work. */

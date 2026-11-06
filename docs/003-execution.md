@@ -123,7 +123,7 @@ Once a person's message reached a blocked or failed Ticket, the Executor has the
 
 A retry ends the current Assignment and starts a new one in the same Executor Session and directory.
 
-The Executor model applies only when a Session is created; an existing Session keeps its model.
+The Executor model applies only when a Session is created; an existing Session keeps its model. A Swarm may pin a model for its master Session and one for its workers: a new Session of that Swarm starts with the pin, and a role the Swarm does not pin uses the global setting.
 ### Restart
 
 Running Assignments end with "host restarted" and new ones start with a recovery note that tells the Executor to check its directory and git history before repeating any outside action, oldest Ticket first.

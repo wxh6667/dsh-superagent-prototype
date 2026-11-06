@@ -4,6 +4,7 @@ import { statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { key, type Swarm, type SwarmBudget } from '../core/index.ts'
 import { MAX_ACTIVE_SWARMS, SWARM_LIMITS } from '../limits.ts'
+import type { RoleModel } from '../policy.ts'
 import type { Store } from './store.ts'
 import type { SwarmWorkspaces } from './swarm-workspaces.ts'
 
@@ -19,6 +20,10 @@ export interface SwarmCreateInput {
   verify?: string
   /** Command run per worker before its work starts; defaults to empty. */
   prepare?: string
+  /** The model a new master Session starts with; absent inherits the global main-Session model. */
+  masterModel?: RoleModel
+  /** The model a new worker Session starts with; absent inherits the global Executor model. */
+  workerModel?: RoleModel
   budget?: Partial<SwarmBudget>
 }
 
@@ -29,7 +34,7 @@ export interface SwarmCreateInput {
 export interface SwarmHost {
   readonly store: Pick<Store, 'swarms' | 'tickets'>
   readonly sessions: {
-    ensureMaster(id: string, cwd: string, title: string, swarmId?: string): Promise<unknown>
+    ensureMaster(id: string, cwd: string, title: string, swarmId?: string, model?: RoleModel | null): Promise<unknown>
     /** Steers the brief into the swarm's master Session, waking it to start; `requestId` keeps the delivery idempotent. */
     relay(requestId: string, text: string, target?: { swarmId?: string }): void
   }
@@ -115,7 +120,7 @@ export class SwarmManager {
     const budget = budgetOf(input.budget)
     const id = key('swarm', title, randomUUID())
     const masterSessionId = `orchestrator-${id}`
-    try { await this.host.sessions.ensureMaster(masterSessionId, workspace, `[swarm] ${title}`, id) }
+    try { await this.host.sessions.ensureMaster(masterSessionId, workspace, `[swarm] ${title}`, id, input.masterModel ?? null) }
     catch (error) {
       // The swarm never existed, so no later finish would clean up what creating its master registered.
       await this.host.workspaces.cleanup(id).catch(() => { /* The failure that stopped creation is the one to report. */ })
@@ -126,6 +131,8 @@ export class SwarmManager {
       id, title, mission,
       ...acceptance ? { acceptance } : {},
       ...scope ? { scope } : {},
+      ...input.masterModel ? { masterModel: input.masterModel } : {},
+      ...input.workerModel ? { workerModel: input.workerModel } : {},
       workspace,
       verify: input.verify ?? 'scripts/verify.sh',
       prepare: input.prepare ?? '',
@@ -212,7 +219,8 @@ export class SwarmManager {
 
   /** Ensures the swarm has a master Session, then unarchives it if DSH had archived it. */
   private async restore(swarm: Swarm): Promise<void> {
-    await this.host.sessions.ensureMaster(swarm.masterSessionId, swarm.workspace, `[swarm] ${swarm.title}`, swarm.id)
+    await this.host.sessions.ensureMaster(swarm.masterSessionId, swarm.workspace, `[swarm] ${swarm.title}`, swarm.id,
+      swarm.masterModel ?? null)
     await this.host.workspace.unarchiveSession(swarm.masterSessionId)
   }
 
