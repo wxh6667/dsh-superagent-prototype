@@ -1,0 +1,30 @@
+{
+  "id": "swarm-github-feishu",
+  "name": "swarm-github-feishu",
+  "title": "精简 swarm 启动并移除 GitHub/Feishu 源",
+  "description": "父任务：把 Superagent 新建流程收敛为「任务目标 + 工作区」，创建后主会话立即拿到简报；同时彻底拆除 GitHub/Feishu 源、订阅与历史数据，只保留本地源。",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "project-agent",
+  "assignee": "project-agent",
+  "createdAt": "2026-11-06",
+  "completedAt": "2026-11-07",
+  "branch": "main",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-06-swarm-models",
+    "11-06-swarm-session-identity",
+    "11-07-lazy-swarm-ownership"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
