@@ -12,12 +12,9 @@ import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLa
 import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead, When } from './widgets.tsx'
 
 function SourceCard({ source }: { source: SourceView }) {
-  const { t, call } = usePanel()
+  const { t } = usePanel()
   const { running } = usePanelData()
-  const { reload } = useSettings()
   const [advancedOpen, setAdvancedOpen] = useState(false)
-  const refreshLabels = async () => { const { added } = await call('POST sources/:id/labels',
-    { id: source.id }); await reload(); return added }
   const draft = useBlockDraft(`source:${source.id}`, source.value, source.revision)
   const value = draft.value
   const { problem, value: saved } = source
@@ -27,8 +24,7 @@ function SourceCard({ source }: { source: SourceView }) {
   const description = localized(t, source.description)
   // Hide derived facts for unsaved field edits until the new value is saved.
   const field = (spec: FieldSpec) => <SourceField key={spec.key} field={spec} value={value.config[spec.key]} saved={saved.config[spec.key]}
-    labels={source.labels}
-    refreshLabels={refreshLabels} fact={spec.type === 'fact' || !changed(spec.key) ? source.facts[spec.key] : undefined}
+    fact={spec.type === 'fact' || !changed(spec.key) ? source.facts[spec.key] : undefined}
     onChange={next => draft.edit({ ...value, config: { ...value.config, [spec.key]: next } })} />
   const advanced = source.fields.filter(spec => spec.advanced)
   return <form id={`dt-source-${source.id}`} className="dt-card" onSubmit={event => { void draft.submit(event) }}>

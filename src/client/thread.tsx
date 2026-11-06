@@ -6,7 +6,7 @@ import { decisionMark } from './marks.ts'
 import { useAction, usePanel } from './provider.tsx'
 import { DecisionLine, Earlier, TicketLine, automatedRuns } from './rows.tsx'
 import { actorName, errorText, readableMarkers, reasonLabel, valueLabel, when, type T } from './text.ts'
-import { ActionLink, ClampText, ConfirmButton, Hint, LoadState, PageHead, Section, When } from './widgets.tsx'
+import { ClampText, ConfirmButton, Hint, LoadState, PageHead, Section, When } from './widgets.tsx'
 
 /** Disposition tags for a Trigger; omits `ignore` (the common case) and suppresses fanout tags when every target Ticket is already listed in `subscribed`. */
 function triggerTags(t: T, trigger: TriggerRow, subscribed?: Set<string>): ReactNode {
@@ -126,7 +126,7 @@ export function ThreadPage({ id, target }: { id: string; target?: string }) {
     await reload()
   }
   return <>
-    <PageHead title={readableMarkers(t, data.title)}>{data.url && <ActionLink href={data.url}>{t('openOriginal')}</ActionLink>}</PageHead>
+    <PageHead title={readableMarkers(t, data.title)} />
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">
       <span>{valueLabel(t, 'source', data.source)}</span><span>{t('threadLatest',

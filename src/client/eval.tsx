@@ -1,15 +1,13 @@
-/** Eval status view (Decision log) and Eval settings group (Policy rules, per-Source admission, and assessor settings). */
+/** Eval status view (Decision log) and Eval settings group (Policy rules, the local Source's list, and assessor settings). */
 import { useState } from 'react'
-import { ADMISSION_DEFAULTS, ADMISSION_OPTIONS, type Admission, type AdmissionCell } from '../admission.ts'
-import type { AdmissionRowView } from '../sources/kind.ts'
 import { LIMITS } from '../limits.ts'
 import { DECISION_FILTERS, DECISION_KINDS, usePoll, type DecisionFilter, type Settings, type SourceView } from './api.ts'
 import { Button, DisclosureRow, Icon, InfoTip, Input, Pill, SegmentedControl, Switch } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
-import { useAction, usePanel } from './provider.tsx'
+import { usePanel } from './provider.tsx'
 import { DecisionLine } from './rows.tsx'
 import { ConfigHistory, Field, Fields, ModelField, SourceField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
-import { localized, valueLabel, when } from './text.ts'
+import { localized, valueLabel } from './text.ts'
 import { Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
 
 export function EvalStatus({ filter, window, paused }: { filter: DecisionFilter; window: '24h' | undefined; paused: boolean }) {
@@ -68,80 +66,26 @@ function RuleRow({ rule, expanded, onToggle, onChange, onDuplicate, onRemove }: 
 }
 
 type Part = Record<string, unknown>
-function SourcePart({ source, part, saved, dirty, onChange, reload }: {
-  source: SourceView; part: Part; saved: Part; dirty: boolean; onChange: (next: Part) => void; reload: () => Promise<void>
-}) {
-  const { t, call, notify } = usePanel()
-  const policy = source.policy!
-  const sync = policy.sync
-  const run = useAction(() => call('POST policy-sync/:id', { id: source.id }), { reload })
-  // Syncing saves the Policy block, so require unsaved edits to be saved or discarded first.
-  const syncNow = () => { if (dirty) notify(t('syncNeedsSave')); else void run.run() }
-  return <div className="dt-part">
-    {policy.fields.map(field => <SourceField key={field.key} field={field} value={part[field.key]} saved={saved[field.key]} fact={undefined}
-      labels={source.labels}
-      onChange={next => onChange({ ...part, [field.key]: next })} />)}
-    {sync && <div className="dt-row-buttons">
-      <Button variant="outline" size="sm" icon={<Icon name="refresh" />} disabled={run.busy || !sync.ready} onClick={syncNow}>{localized(t,
-        sync.label)}</Button>
-      {sync.health?.state === 'ready' && sync.health.at && <LabelValue label={t('syncDone')} value={when(sync.health.at, t('lang'))} />}
-      {sync.health?.state === 'error' && <span className="dt-error dt-clamp">{sync.health.detail}</span>}
-    </div>}
-    {policy.rows ? <AdmissionTable rows={policy.rows} labels={source.labels} table={(part.admission ?? {}) as AdmissionTable}
-      explicit={localized(t, policy.explicit)}
-      onChange={admission => onChange({ ...part, admission })} />
-      : <div className="dt-field"><span className="dt-field-head">{t('explicitRequest')}</span><span>{localized(t,
-        policy.explicit)}</span></div>}
-  </div>
-}
-
-type AdmissionTable = Record<string, Partial<Record<AdmissionCell, Admission>>>
-const CELLS: readonly AdmissionCell[] = ['listedUnaddressed', 'unlistedAddressed', 'unlistedUnaddressed']
-function AdmissionTable({ rows, labels, table, explicit, onChange }: {
-  rows: AdmissionRowView[]; labels: Record<string,
-    string>; table: AdmissionTable; explicit: string; onChange: (table: AdmissionTable) => void
+function SourcePart({ source, part, saved, onChange }: {
+  source: SourceView; part: Part; saved: Part; onChange: (next: Part) => void
 }) {
   const { t } = usePanel()
-  const name = (row: AdmissionRowView) => labels[row.id] ?? localized(t, row.label)
-  const set = (row: string, cell: AdmissionCell, value: Admission) => onChange({ ...table, [row]: { ...table[row], [cell]: value } })
-  const select = (row: AdmissionRowView, cell: AdmissionCell) => {
-    const value = table[row.id]?.[cell] ?? ADMISSION_DEFAULTS[cell]
-    // Reserve a fixed-width slot for the warning icon so selecting a value never shifts column widths.
-    return <td key={cell}><span className="dt-admission-cell">
-      <select className="dt-select" aria-label={`${name(row)} · ${t(`admissionCell.${cell}`)}`} value={value} onChange={event => set(row.id,
-        cell, event.target.value as Admission)}>
-        {ADMISSION_OPTIONS[cell].map(option => <option key={option} value={option}>{t(`admissionValue.${option}`)}</option>)}
-      </select>
-      <span className="dt-admission-slot">{cell === 'unlistedAddressed' && value === 'explicit' && <InfoTip
-        text={t('admissionAnyoneWarning')} icon="alert" warn />}</span>
-    </span></td>
-  }
-  return <Section title={t('admission')} hint={t('admissionHint')}>
-    <Hint>{explicit}</Hint>
-    <table className="dt-table dt-admission">
-      <thead>
-        <tr><th rowSpan={2}>{t('admissionScope')}</th><th>{t('admissionListed')}</th><th colSpan={2}>{t('admissionUnlisted')}</th></tr>
-        <tr><th>{t('admissionUnaddressed')}</th><th>{t('admissionAddressed')}</th><th>{t('admissionUnaddressed')}</th></tr>
-      </thead>
-      <tbody>{rows.map(row => <tr key={row.id}>
-        <td className="dt-admission-scope">{name(row)}<small>{localized(t, row.note)}</small></td>
-        {CELLS.map(cell => row.cells[cell] ? select(row, cell) : <td key={cell} className="dt-admission-na"
-          aria-label={t('admissionNotReceived')}>—</td>)}
-      </tr>)}</tbody>
-    </table>
-    <Hint>{t('admissionFootnote')}</Hint>
-  </Section>
+  const policy = source.policy!
+  return <div className="dt-part">
+    {policy.fields.map(field => <SourceField key={field.key} field={field} value={part[field.key]} saved={saved[field.key]} fact={undefined}
+      onChange={next => onChange({ ...part, [field.key]: next })} />)}
+    <div className="dt-field"><span className="dt-field-head">{t('explicitRequest')}</span><span>{localized(t,
+      policy.explicit)}</span></div>
+  </div>
 }
 
 function PolicyBlock() {
   const { t } = usePanel()
-  const { settings: { blocks, sources, policyVersion }, reload } = useSettings()
+  const { settings: { blocks, sources, policyVersion } } = useSettings()
   const draft = useBlockDraft('policy', blocks.policy.value, blocks.policy.revision)
   const policy = draft.value
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const parts = sources.filter(source => source.installed && source.policy)
-  const [tab, setTab] = useState<string>()
-  const current = parts.find(source => source.id === tab) ?? parts[0]
+  const current = sources.find(source => source.installed && source.policy)
   const edit = (next: Partial<typeof policy>) => draft.edit({ ...policy, ...next })
   const toggle = (id: string) => { const next = new Set(expanded); if (next.has(id)) next.delete(id); else next.add(id); setExpanded(next) }
   const insert = (rule: Rule, at: number) => {
@@ -172,17 +116,10 @@ function PolicyBlock() {
           onRemove={() => edit({ rules: policy.rules.filter((_, position) => position !== index) })} />)}</ul>
             : <Hint>{t('rulesEmpty')}</Hint>}
       </Section>
-      {current && <Section title={t('policyPerSource')} hint={t('policyPerSourceHint')}>
-        {parts.length > 1 && <div className="dt-subtabs" role="tablist" aria-label={t('policyPerSource')}>
-          {parts.map(source => <button key={source.id} type="button" role="tab" aria-selected={source === current} className="dt-subtab"
-            onClick={() => setTab(source.id)}>
-            {localized(t, source.title)}
-          </button>)}
-        </div>}
+      {current && <Section title={t('policyLocal')} hint={t('policyLocalHint')}>
         <SourcePart key={current.id} source={current} part={part(current.id)}
-          saved={(blocks.policy.value.sources[current.id] ?? {}) as Part} dirty={draft.dirty}
-          reload={reload} onChange={next => edit({ sources: { ...policy.sources,
-            [current.id]: next as typeof policy.sources[string] } })} />
+          saved={(blocks.policy.value.sources[current.id] ?? {}) as Part}
+          onChange={next => edit({ sources: { ...policy.sources, [current.id]: next as typeof policy.sources[string] } })} />
       </Section>}
     </Fields>
     <SaveBar {...draft} onDiscard={draft.discard} />

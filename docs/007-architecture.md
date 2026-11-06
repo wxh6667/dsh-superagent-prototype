@@ -416,12 +416,13 @@ None: the bundle mounts only the Local Source, and no generic module names a rem
 | `tests/trellis.spec.ts` | The Trellis adapter: parent/child creation and artifacts, session-scoped start, archive, current task, and task-path validation |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
+| `tests/panel-panel.spec.tsx`, `tests/panel-overview.spec.tsx`, `tests/panel-source.spec.tsx`, `tests/panel-trigger.spec.tsx`, `tests/panel-eval.spec.tsx`, `tests/panel-execution.spec.tsx`, `tests/panel-settings.spec.tsx`, `tests/panel-prompts.spec.tsx`, `tests/panel-deployment.spec.tsx`, `tests/panel-swarms.spec.tsx` | The panel's search and shell, Overview, the local Source and its settings, Threads and Triggers, Decisions and the local Policy, Tickets and Execution settings, settings drafts and history, Prompts, Deployment, and the Swarm launcher |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `chat.ts`, a generic chat Source kind and Trigger builder; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `chat.ts`, a generic chat Source kind and Trigger builder; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; `panel.tsx` and `panel-server.ts`, the panel's DOM harness and fake local-only management API; and `async.ts`.
 
 ## Persistence
 

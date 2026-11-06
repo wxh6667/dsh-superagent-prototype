@@ -1,11 +1,11 @@
 /** Shared list rows for Tickets, Threads, and Decisions, plus Source fact chips and automated-message run folding. */
 import { useState } from 'react'
 import type { DecisionRow, ThreadFacts, ThreadRow, TicketRow } from './api.ts'
-import { Icon, Tag } from './controls.tsx'
+import { Tag } from './controls.tsx'
 import { decisionMark, threadMark, ticketMark } from './marks.ts'
 import { usePanel } from './provider.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
-import { ActionLink, ConfirmButton, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
+import { ConfirmButton, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
 
 export function TicketLine({ ticket, question, onChanged, context }: {
   ticket: TicketRow; question?: boolean; onChanged?: () => Promise<void>; context?: boolean
@@ -14,7 +14,6 @@ export function TicketLine({ ticket, question, onChanged, context }: {
   const status = ticketMark(t, ticket)
   const after = async (request: Promise<unknown>) => { await request; await onChanged?.() }
   const note = question && ticket.note && { ...ticket.note, text: readableMarkers(t, ticket.note.text) }
-  const answer = ticket.reply && ticket.stage === 'person' && ticket.action === 'answer' ? ticket.reply : undefined
   return <li className="dt-row dt-link dt-ticket" data-state={question ? status.dot : undefined}>
     <div className="dt-ticket-stage"><StageMark state={status.dot} icon={status.icon} label={status.label} /></div>
     <div className="dt-ticket-body">
@@ -29,8 +28,6 @@ export function TicketLine({ ticket, question, onChanged, context }: {
       </div>
       {/* Always render the actions container so every Ticket row keeps a uniform three-line height. */}
       <div className="dt-ticket-actions">{onChanged && <>
-        {answer && <ActionLink href={answer.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source',
-          answer.source) })}</ActionLink>}
         {ticket.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
           message={t('retryConfirm', { title: ticket.title })}
           onConfirm={() => after(call('POST tickets/:id/retry', { id: ticket.id }))} />}
@@ -101,18 +98,15 @@ export function DecisionLine({ decision }: { decision: DecisionRow }) {
   </li>
 }
 
-function ThreadChip({ thread }: { thread: Pick<ThreadFacts, 'source' | 'facts' | 'url' | 'title'> }) {
+function ThreadChip({ thread }: { thread: Pick<ThreadFacts, 'source' | 'facts' | 'title'> }) {
   const { t } = usePanel()
-  const cells = <>
+  return <span className="dt-chip" title={thread.title}>
     <span className="dt-chip-source">{valueLabel(t, 'source', thread.source)}</span>
     {Object.entries(thread.facts).map(([id, fact]) => <span key={id} className={fact.problem ? 'dt-chip-fact dt-chip-problem'
       : 'dt-chip-fact'}>
       {fact.label && <span className="dt-chip-label">{localized(t, fact.label)}</span>}{localized(t, fact.value)}
     </span>)}
-  </>
-  return thread.url ? <a className="dt-chip dt-chip-link" href={thread.url} target="_blank" rel="noopener noreferrer" title={thread.title}>
-    {cells}<span className="dt-chip-open"><Icon name="external" size={11} /></span>
-  </a> : <span className="dt-chip">{cells}</span>
+  </span>
 }
 
 type Run<I> = { item: I; earlier: I[] }

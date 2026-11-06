@@ -29,14 +29,12 @@ const ICON_PATHS = {
   user: 'M12 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5',
   close: 'M6 6l12 12M18 6L6 18',
   settings: 'M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4',
-  external: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
   session: 'M4 5h16v14H4zM8 10l3 2-3 2M13 15h3',
   stop: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5h5v5h-5z',
   pause: 'M9 6v12M15 6v12',
   play: 'M8 5l11 7-11 7z',
   unsubscribe: 'M6 16v-5a6 6 0 0 1 10-4.5M18 11v5l2 2H8M10 20h4M4 4l16 16',
   dismiss: 'M4 4l16 16M9.9 5.2A9 9 0 0 1 21 12a12 12 0 0 1-2.4 3.2M6.3 6.4A12 12 0 0 0 3 12c2 4 5.5 6 9 6 1.4 0 2.7-.3 3.9-.9',
-  pull: 'M7 4a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM7 8v8M7 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM17 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM17 16V9a2 2 0 0 0-2-2h-4M13 5l-2 2 2 2',
   copy: 'M9 9h10v11H9zM5 15V4h10',
   review: 'M9 4h6v3H9zM7 5H5v15h14V5h-2M9 13l2 2 4-4',
   ask: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01',
@@ -215,7 +213,7 @@ export function Modal({ open, onClose, title, closeLabel, description, footer, c
 }
 
 /** Portaled tooltip trigger supporting hover, keyboard focus, and touch toggle. */
-export function InfoTip({ text, icon = 'question', warn }: { text: string; icon?: IconName; warn?: boolean }) {
+export function InfoTip({ text, icon = 'question' }: { text: string; icon?: IconName }) {
   const anchor = useRef<HTMLButtonElement>(null)
   const bubble = useRef<HTMLSpanElement>(null)
   const [open, setOpen] = useState(false)
@@ -236,7 +234,7 @@ export function InfoTip({ text, icon = 'question', warn }: { text: string; icon?
     return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close) }
   }, [open])
   return <>
-    <button ref={anchor} type="button" className={warn ? 'dt-info dt-info-warn' : 'dt-info'} aria-label={text}
+    <button ref={anchor} type="button" className="dt-info" aria-label={text}
       onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)} onBlur={() => setOpen(false)}
       onFocus={event => { if (event.currentTarget.matches(':focus-visible')) setOpen(true) }}
       onKeyDown={event => { if (event.key === 'Escape') setOpen(false) }}

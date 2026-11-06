@@ -5,7 +5,6 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ApiError, caller, usePoll } from '../src/client/api.ts'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
-import { SettingsSchema } from '../src/policy.ts'
 
 declare global { var IS_REACT_ACT_ENVIRONMENT: boolean }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
@@ -47,8 +46,8 @@ const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   if (path === 'swarms') return Response.json({ items: [swarm], defaultWorkspace: '/srv/repo', legacyMasterId: 'master' })
   if (path === 'swarms/swarm-1/open') return Response.json({ swarm, masterId: 'master' })
   if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
-  if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
-    setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
+  if (path === 'state') return Response.json({ masterId: 'master', paused: false, health: {}, load: { running: 0, queued: 0 },
+    setup: { machine: { stateDir: '/srv/state', promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null } })
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
 afterEach(() => { vi.unstubAllGlobals() })

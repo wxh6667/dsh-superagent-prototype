@@ -281,10 +281,6 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-chip-source { padding: 0 6px; color: var(--dsw-alias-label-tertiary); background: var(--dsw-alias-bg-module-platform); }
 .dt-chip-fact { padding: 0 6px; border-left: 0.5px solid var(--dsw-alias-border-l3); white-space: nowrap; }
 .dt-chip-label { margin-right: 4px; color: var(--dsw-alias-label-caption); }
-.dt-chip-link { position: relative; z-index: 1; text-decoration: none; cursor: pointer; transition: border-color 120ms ease; }
-.dt-chip-link:hover { border-color: var(--dsw-alias-brand-primary); }
-.dt-chip-link:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.dt-chip-open { display: inline-flex; align-items: center; padding: 0 5px; border-left: 0.5px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-brand-primary); }
 .dt-chip-problem, .dt-chip-problem .dt-chip-label { color: var(--dsw-alias-state-error-primary); }
 .dt-cards { gap: 8px; }
 .dt-att .dt-inline-link { font-size: 13px; font-weight: 500; }
@@ -351,7 +347,6 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-trigger-link:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .dt-trigger-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .dt-kv-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.dt-banner-actions { margin-top: 6px; }
 @container (max-width: 640px) {
   .dt-list > .dt-ticket { grid-template-columns: 1fr; row-gap: 4px; }
   .dt-ticket-stage { border-right: 0; }
@@ -369,14 +364,4 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-default-updated { display: flex; flex-direction: column; gap: 6px; padding: 2px 0 2px 12px; border-left: 2px solid var(--dsw-alias-state-warn-primary); }
 .dt-diff-fold { color: var(--dsw-alias-label-caption); font-style: italic; }
 .dt-compare { margin-left: auto; }
-.dt-admission th { white-space: nowrap; }
-.dt-admission thead tr:first-child th:not(:first-child) { color: var(--dsw-alias-label-secondary); font-weight: 500; }
-.dt-admission td { vertical-align: middle; }
-.dt-admission-scope { color: var(--dsw-alias-label-primary); font-size: 13px; }
-.dt-admission-scope small { display: block; font-size: 11px; color: var(--dsw-alias-label-caption); }
-.dt-admission-na { color: var(--dsw-alias-label-caption); }
-.dt-admission-cell { display: flex; align-items: center; gap: 4px; }
-.dt-admission-cell .dt-select { flex: 1; min-width: 0; }
-.dt-admission-slot { display: inline-flex; flex: none; width: 16px; }
-.dt-info-warn { color: var(--dsw-alias-state-warn-primary); }
 .dt-field-segmented { max-width: 240px; }
